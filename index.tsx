@@ -4,12 +4,14 @@ declare const Chart: any;
 declare const ChartDataLabels: any;
 declare const jspdf: { jsPDF: any };
 declare const html2canvas: any;
+// ADICIONADO: Declaração para o TypeScript reconhecer o Firebase
 declare const firebase: any;
 
 // ======================================================
 // ==== BLOCO DE INICIALIZAÇÃO E FUNÇÕES DO FIREBASE ====
 // ======================================================
 
+// 1. Configuração do Firebase com as variáveis de ambiente
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
@@ -19,119 +21,71 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
+// 2. Inicializa o Firebase e o Firestore Database
 if (!firebase.apps.length) {
   firebase.initializeApp(firebaseConfig);
 }
 const db = firebase.firestore();
-const COLECAO_CONTAINERES = "painel-containeres"; // Nome da nossa coleção
 
-// --- NOVAS FUNÇÕES DO FIREBASE (CORRIGIDAS PARA O NOVO MÉTODO) ---
+// 3. Função para salvar os dados no Firestore (substitui o saveDataToStorage)
+//    Esta função será chamada sempre que houver uma alteração local (upload, mudança no buffer).
+const sincronizarComFirestore = () => {
+  const stateToSave = {
+    data: originalData,
+    containersInBuffer: Array.from(containersInBuffer),
+    timestamp: new Date().toISOString()
+  };
+  
+  // Usamos um documento fixo para guardar o estado completo do dashboard
+  db.collection("painel-containeres").doc("estado-atual").set(stateToSave)
+    .then(() => {
+      console.log("Dashboard sincronizado com o Firestore!");
+    })
+    .catch((error: any) => {
+      console.error("Erro ao sincronizar com o Firestore: ", error);
+      showToast("Erro ao salvar dados na nuvem.", "error");
+    });
+};
 
-/**
- * Apaga todos os documentos de uma coleção. Usado antes de um novo upload.
- */
-async function limparColecao() {
-  const querySnapshot = await db.collection(COLECAO_CONTAINERES).get();
-  const batch = db.batch();
-  querySnapshot.docs.forEach(doc => {
-    batch.delete(doc.ref);
-  });
-  await batch.commit();
-  console.log("Coleção antiga limpa.");
-}
-
-/**
- * Salva uma lista de contêineres no Firestore. Cada contêiner vira um documento.
- * @param {any[]} containers - A lista de contêineres para salvar.
- */
-async function sincronizarComFirestore(containers: any[]) {
-    showLoading();
-    try {
-        // 1. Limpa os dados antigos para garantir que só os novos existam.
-        await limparColecao();
-        
-        // 2. Salva os novos dados em lotes para ser mais rápido e eficiente.
-        const batchArray = [];
-        let currentBatch = db.batch();
-        let operationCount = 0;
-
-        for (const container of containers) {
-            // Firestore usa o número do contêiner como ID único do documento
-            const docId = String(container['CNTRS ORIGINAL'] || `doc-${Math.random()}`);
-            const docRef = db.collection(COLECAO_CONTAINERES).doc(docId);
-            currentBatch.set(docRef, container);
-            operationCount++;
-
-            // O Firestore limita lotes a 500 operações. Criamos um novo lote quando atingimos o limite.
-            if (operationCount === 499) {
-                batchArray.push(currentBatch);
-                currentBatch = db.batch();
-                operationCount = 0;
-            }
-        }
-        if (operationCount > 0) {
-            batchArray.push(currentBatch);
-        }
-
-        // 3. Envia todos os lotes para o Firestore.
-        await Promise.all(batchArray.map(batch => batch.commit()));
-        
-        console.log(`${containers.length} contêineres sincronizados com sucesso!`);
-        // A UI vai atualizar automaticamente por causa do listener, então só mostramos um toast.
-        showToast("Dashboard sincronizado com a nuvem!", "success");
-
-    } catch (error) {
-        console.error("Erro ao sincronizar com Firestore: ", error);
-        showToast("Ocorreu um erro grave ao salvar os dados.", "error");
-    } finally {
-        hideLoading();
-    }
-}
-
-
-/**
- * Escuta por mudanças na coleção de contêineres e atualiza a UI.
- */
+// 4. Função para escutar mudanças no Firestore (substitui o loadDataFromStorage)
+//    Esta função é a "mágica" do tempo real. Ela atualiza a tela quando os dados mudam no servidor.
 const escutarMudancasEmTempoReal = () => {
-  db.collection(COLECAO_CONTAINERES).onSnapshot(
-    (querySnapshot: any) => {
-        const dadosDaNuvem: any[] = [];
-        querySnapshot.forEach((doc: any) => {
-            dadosDaNuvem.push(doc.data());
-        });
-        
-        console.log(`${dadosDaNuvem.length} contêineres recebidos do Firestore.`);
+  db.collection("painel-containeres").doc("estado-atual").onSnapshot(
+    (doc: any) => {
+      if (doc.exists) {
+        const estadoDaNuvem = doc.data();
+        console.log("Dados recebidos do Firestore em tempo real.");
         
         // Atualiza o estado global da aplicação com os dados da nuvem
-        originalData = dadosDaNuvem;
+        originalData = estadoDaNuvem.data || [];
+        containersInBuffer = new Set(estadoDaNuvem.containersInBuffer || []);
         
-        if (originalData.length > 0) {
-            // Renderiza a UI com os novos dados
-            populateFilters(originalData);
-            applyFiltersAndRender();
-            showDashboard();
-            lastUpdate.textContent = `${t('upload_prompt_updated')} ${new Date().toLocaleString('pt-BR')}`;
-            showToast("Dashboard atualizado!", "success");
-        } else {
-            // Se não há dados na nuvem, reseta a UI para o estado inicial.
-            resetUI();
-        }
+        // Renderiza a UI com os novos dados
+        populateFilters(originalData);
+        applyFiltersAndRender();
+        showDashboard();
+        
+        const loadedDate = new Date(estadoDaNuvem.timestamp);
+        lastUpdate.textContent = `${t('upload_prompt_updated')} ${loadedDate.toLocaleString('pt-BR')}`;
+        showToast("Dashboard atualizado em tempo real!", "success");
+
+      } else {
+        console.log("Nenhum dado no Firestore. Aguardando primeiro upload.");
+        // Se não há dados, a UI já está no estado inicial, então não fazemos nada.
+      }
     },
     (error: any) => {
-        console.error("Erro de conexão com o Firestore: ", error);
-        showToast("Erro de conexão com o servidor de dados.", "error");
+      console.error("Erro de conexão com o Firestore: ", error);
+      showToast("Erro de conexão com o servidor de dados.", "error");
     }
   );
 };
 
 
-// --- O restante do seu código permanece praticamente o mesmo ---
-// --- A única mudança será nos lugares que chamam as funções de salvar/limpar ---
-
-// --- DOM Elements ---
+// --- DOM Elements (código original sem alterações) ---
 const fileUpload = document.getElementById('file-upload') as HTMLInputElement;
-// ... (resto dos seletores)
 const dashboardGrid = document.getElementById('dashboard-grid') as HTMLElement;
+// ... (todo o restante dos seus seletores de DOM permanece igual) ...
 const lastUpdate = document.getElementById('last-update') as HTMLElement;
 const placeholder = document.getElementById('placeholder') as HTMLElement;
 const filterContainer = document.getElementById('filter-container') as HTMLElement;
@@ -173,8 +127,7 @@ const mediumRiskCount = document.getElementById('medium-risk-count') as HTMLElem
 const lowRiskCount = document.getElementById('low-risk-count') as HTMLElement;
 const noneRiskCount = document.getElementById('none-risk-count') as HTMLElement;
 
-
-// --- Global State ---
+// --- Global State (código original sem alterações) ---
 type RiskCategory = 'high' | 'medium' | 'low' | 'none';
 type View = 'vessel' | 'po' | 'warehouse' | 'plan' | 'buffer';
 let originalData: any[] = [];
@@ -187,15 +140,14 @@ let modalSortState: { column: string | null; direction: 'asc' | 'desc' } = { col
 let activeRiskFilter: RiskCategory | null = null;
 let currentLanguage: 'pt' | 'zh' = 'pt';
 let deliveryPlanCache: { [date: string]: any[] } = {};
-// NOTA: O buffer agora não é mais necessário aqui, pois os dados já vêm do Firestore.
-// Vamos deixar a lógica de manipulação local, mas ela não precisa ser salva separadamente.
-let containersInBuffer: Set<string> = new Set(); 
+let containersInBuffer: Set<string> = new Set();
+// AVISO: As chaves de storage local não serão mais a fonte principal de dados.
+const STORAGE_KEY = 'containerDashboardData_backup'; // Renomeado para evitar conflito
 const THEME_STORAGE_KEY = 'containerDashboardTheme';
 
-
-// --- Translation Dictionary (sem alterações) ---
+// --- Translation Dictionary (código original sem alterações) ---
 const translations = {
-    pt: {
+    pt: { /* ... seu objeto de traduções em português ... */ 
         main_title: "DASHBOARD DE CONTROLE DE CONTÊINERES",
         upload_prompt_initial: "Carregue um arquivo .xlsx para começar",
         upload_prompt_success: "Dados de",
@@ -253,7 +205,7 @@ const translations = {
         buffer_is_full: "O buffer está cheio. Não é possível adicionar mais contêineres.",
         buffer_filter_container: "Filtrar Contêiner",
     },
-    zh: {
+    zh: { /* ... seu objeto de traduções em chinês ... */ 
         main_title: "集装箱控制仪表板",
         upload_prompt_initial: "上传一个 .xlsx 文件开始",
         upload_prompt_success: "数据来自",
@@ -314,7 +266,6 @@ const translations = {
 };
 
 const t = (key: keyof typeof translations.pt, el?: HTMLElement) => {
-    // ... (código original sem alterações)
     const text = translations[currentLanguage][key] || key;
     if (el) {
         if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
@@ -326,7 +277,6 @@ const t = (key: keyof typeof translations.pt, el?: HTMLElement) => {
     return text;
 };
 
-
 // --- Main App Initialization ---
 window.addEventListener('load', initializeApp);
 
@@ -336,9 +286,10 @@ function initializeApp() {
     }
     Chart.register(ChartDataLabels);
 
-    // Event Listeners
+    // Event Listeners (código original sem alterações)
     fileUpload.addEventListener('change', handleFileUpload);
     applyFiltersBtn.addEventListener('click', applyFiltersAndRender);
+    // ... (todos os seus outros event listeners permanecem iguais) ...
     resetFiltersBtn.addEventListener('click', resetFiltersAndRender);
     vesselSearchInput.addEventListener('input', filterVesselOptions);
     shipownerSearchInput.addEventListener('input', filterShipownerOptions);
@@ -351,17 +302,17 @@ function initializeApp() {
         }
     });
     exportPdfBtn.addEventListener('click', handlePdfExport);
-    
-    // MODIFICADO: O botão de limpar agora chama a função de limpar a coleção
-    clearDataBtn.addEventListener('click', async () => {
-        if(confirm("Você tem certeza que quer limpar TODOS os dados da nuvem? Esta ação é irreversível.")) {
-            showLoading();
-            await limparColecao(); // Chama a função que limpa o Firestore
-            hideLoading();
-            // A UI vai resetar automaticamente por causa do listener
+    clearDataBtn.addEventListener('click', () => {
+        // MODIFICADO: Esta ação agora limpa os dados na nuvem para todos.
+        if(confirm("Você tem certeza que deseja limpar os dados para TODOS os usuários? Esta ação não pode ser desfeita.")) {
+            // Para limpar, salvamos um estado vazio.
+            originalData = [];
+            containersInBuffer.clear();
+            sincronizarComFirestore();
+            resetUI(); // Reseta a UI local imediatamente
+            showToast("Dados na nuvem foram limpos.", "success");
         }
     });
-
     summaryContainer.addEventListener('click', handleSummaryCardClick);
     translateBtn.addEventListener('click', toggleLanguage);
     themeToggleBtn.addEventListener('click', toggleTheme);
@@ -388,33 +339,120 @@ function initializeApp() {
             renderBufferControlView(filteredDataCache);
         }
     });
-
-    // Modal Listeners
     modalCloseBtn.addEventListener('click', closeModal);
     detailsModal.addEventListener('click', (e) => { if (e.target === detailsModal) closeModal(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !detailsModal.classList.contains('hidden')) closeModal(); });
 
     initializeTheme();
     
-    // Inicia o listener do Firebase
+    // MODIFICADO: Em vez de carregar do storage local, iniciamos o listener do Firebase.
     escutarMudancasEmTempoReal();
 }
 
+// --- Funções de UI e Lógica (a maioria permanece igual) ---
 
-// --- File Handling (MODIFICADO) ---
+function showLoading() { loadingOverlay.classList.remove('hidden'); }
+function hideLoading() { loadingOverlay.classList.add('hidden'); }
+
+function showToast(message: string, type: 'success' | 'error' | 'warning' = 'success') {
+    // ... (código original sem alterações) ...
+    const toastContainer = document.getElementById('toast-container');
+    if (!toastContainer) return;
+    const toast = document.createElement('div');
+    const icons = { success: 'fa-check-circle', error: 'fa-times-circle', warning: 'fa-exclamation-triangle' };
+    const colors = { success: 'bg-green-500', error: 'bg-red-500', warning: 'bg-yellow-500' };
+    toast.className = `toast ${colors[type]} text-white py-3 px-5 rounded-lg shadow-xl flex items-center mb-2`;
+    toast.innerHTML = `<i class="fas ${icons[type]} mr-3"></i> <p>${message}</p>`;
+    toastContainer.appendChild(toast);
+    setTimeout(() => toast.remove(), 5000);
+}
+
+function initializeTheme() {
+    // ... (código original sem alterações) ...
+    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) as 'light' | 'dark' | null;
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const theme = savedTheme || (prefersDark ? 'dark' : 'light');
+    applyTheme(theme);
+}
+
+function toggleTheme() {
+    // ... (código original sem alterações) ...
+    const isDark = document.documentElement.classList.contains('dark');
+    const newTheme = isDark ? 'light' : 'dark';
+    localStorage.setItem(THEME_STORAGE_KEY, newTheme);
+    applyTheme(newTheme);
+}
+
+function applyTheme(theme: 'light' | 'dark') {
+    // ... (código original sem alterações) ...
+    const themeToggleIcon = document.getElementById('theme-toggle-icon') as HTMLElement;
+    if (theme === 'dark') {
+        document.documentElement.classList.add('dark');
+        themeToggleIcon.classList.remove('fa-moon');
+        themeToggleIcon.classList.add('fa-sun');
+    } else {
+        document.documentElement.classList.remove('dark');
+        themeToggleIcon.classList.remove('fa-sun');
+        themeToggleIcon.classList.add('fa-moon');
+    }
+    const isDarkMode = theme === 'dark';
+    Chart.defaults.color = isDarkMode ? '#cbd5e1' : '#64748b';
+    Chart.defaults.borderColor = isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
+    if (originalData.length > 0) {
+        applyFiltersAndRender();
+    }
+}
+
+function toggleLanguage() {
+    // ... (código original sem alterações) ...
+    currentLanguage = currentLanguage === 'pt' ? 'zh' : 'pt';
+    translateBtnText.textContent = currentLanguage === 'pt' ? '中文' : 'Português';
+    translateUI();
+}
+
+function translateUI() {
+    // ... (código original sem alterações) ...
+    document.querySelectorAll('[data-translate-key]').forEach(el => {
+        const key = el.getAttribute('data-translate-key') as keyof typeof translations.pt;
+        if (key) {
+           t(key, el as HTMLElement);
+        }
+    });
+    if (originalData.length > 0) {
+        applyFiltersAndRender();
+        if (activeModalItem) {
+            renderModalContent();
+        }
+    }
+}
+
+// --- Data Persistence (Funções Antigas Removidas/Substituídas) ---
+// A função loadDataFromStorage foi substituída por escutarMudancasEmTempoReal.
+// A função saveDataToStorage foi substituída por sincronizarComFirestore.
+
+// --- File Handling ---
 function handleFileUpload(event: Event) {
     const target = event.target as HTMLInputElement;
     const file = target.files?.[0];
-    if (!file) return;
+    const uploadLabel = document.querySelector('label[for="file-upload"] span');
+    if (!file || !uploadLabel) return;
+
+    const parentLabel = uploadLabel.parentElement as HTMLElement;
+    parentLabel.classList.add('opacity-50', 'cursor-not-allowed');
+    uploadLabel.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> ${t('loading_text')}`;
 
     const reader = new FileReader();
-    reader.onload = async (e) => {
+    reader.onload = (e) => {
         try {
             const workbook = XLSX.read(new Uint8Array(e.target!.result as ArrayBuffer), { type: 'array' });
-            const sheetName = workbook.SheetNames[0]; // Pega a primeira planilha
-            const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: false, defval: '' });
+            const sheetName = workbook.SheetNames.find((name: string) => name.toUpperCase().includes('PLANILHA1'));
+            if (!sheetName || !workbook.Sheets[sheetName]) throw new Error(`Nenhuma planilha válida (ex: "Planilha1") foi encontrada.`);
             
-            const processedData = rawData.map((row: any) => {
+            const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: false, defval: '' });
+            if (!Array.isArray(rawData)) throw new Error("O formato dos dados da planilha é inválido.");
+            if (rawData.length === 0) throw new Error("A planilha está vazia.");
+
+            originalData = rawData.map((row: any) => {
                 const normalizedRow: { [key: string]: any } = {};
                 for (const key in row) {
                     if (Object.prototype.hasOwnProperty.call(row, key)) {
@@ -424,24 +462,554 @@ function handleFileUpload(event: Event) {
                 }
                 return normalizedRow;
             });
+            
+            containersInBuffer.clear(); // Reseta o buffer ao carregar novo arquivo
 
-            // A chamada para sincronizar agora envia os dados processados
-            await sincronizarComFirestore(processedData);
-
+            // MODIFICADO: Em vez de salvar localmente, sincroniza com o Firestore.
+            // A UI será atualizada automaticamente pelo "escutador" (listener).
+            sincronizarComFirestore();
+            
+            showToast('Arquivo enviado. Sincronizando com todos os usuários...', 'success');
         } catch (err: any) {
             showToast(err.message || 'Erro ao processar arquivo.', 'error');
+            resetUI();
         } finally {
-            fileUpload.value = ''; // Limpa o input de arquivo
+            parentLabel.classList.remove('opacity-50', 'cursor-not-allowed');
+            uploadLabel.innerHTML = t('upload_btn');
+            fileUpload.value = '';
         }
     };
-    reader.onerror = () => { showToast('Não foi possível ler o arquivo.', 'error'); };
+    reader.onerror = () => { showToast('Não foi possível ler o arquivo.', 'error'); resetUI(); };
     reader.readAsArrayBuffer(file);
 }
 
-// --- Buffer Action (MODIFICADO) ---
-// AVISO: A lógica do buffer agora é apenas visual e local.
-// Ela não salva um estado separado no Firestore, pois os dados já estão lá.
-// Se você precisar que o estado do buffer seja salvo, precisaríamos de uma lógica mais complexa.
+// --- O RESTANTE DO CÓDIGO (Data Processing, UI Rendering, Exports, Modal) ---
+// --- A maioria dessas funções não precisa de alteração, exceto onde salvam o estado. ---
+
+function excelDateToJSDate(serial: any): Date | null {
+    // ... (código original sem alterações) ...
+    if (serial === null || serial === undefined || serial === '') return null;
+    if (typeof serial === 'string') {
+        if (/^\d{5}$/.test(serial)) { serial = parseInt(serial, 10); }
+        else {
+            const parts = serial.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+            if (parts) {
+                const date = new Date(Date.UTC(Number(parts[3]), Number(parts[2]) - 1, Number(parts[1])));
+                return isNaN(date.getTime()) ? null : date;
+            }
+            const fallbackDate = new Date(serial);
+            return isNaN(fallbackDate.getTime()) ? null : fallbackDate;
+        }
+    }
+    if (typeof serial === 'number' && serial >= 1) {
+        const utc_days = Math.floor(serial - 25569);
+        const date_info = new Date(utc_days * 86400 * 1000);
+        return new Date(date_info.getTime() + (date_info.getTimezoneOffset() * 60 * 1000));
+    }
+    return null;
+}
+
+function getContainerRisk(container: any): RiskCategory {
+    // ... (código original sem alterações) ...
+    const isDelivered = (container['STATUS'] || '').toLowerCase().includes('entregue');
+    if (isDelivered) return 'none';
+    const deadline = excelDateToJSDate(container['DEADLINE RETURN CNTR']);
+    if (deadline) {
+        const daysToDeadline = Math.ceil((deadline.getTime() - TODAY.getTime()) / (1000 * 3600 * 24));
+        if (daysToDeadline < 0) return 'high';
+        if (daysToDeadline <= 7) return 'medium';
+    }
+    return 'low';
+}
+
+function getSelectedOptions(select: HTMLSelectElement) { return Array.from(select.selectedOptions).map(opt => opt.value); }
+
+function filterVesselOptions() {
+    // ... (código original sem alterações) ...
+    const searchTerm = vesselSearchInput.value.toUpperCase();
+    const options = vesselFilter.options;
+    for (let i = 0; i < options.length; i++) {
+        const option = options[i] as HTMLOptionElement;
+        const optionText = option.textContent?.toUpperCase() || '';
+        option.style.display = optionText.includes(searchTerm) ? '' : 'none';
+    }
+}
+
+function filterShipownerOptions() {
+    // ... (código original sem alterações) ...
+    const searchTerm = shipownerSearchInput.value.toUpperCase();
+    const options = shipownerFilter.options;
+    for (let i = 0; i < options.length; i++) {
+        const option = options[i] as HTMLOptionElement;
+        const optionText = option.textContent?.toUpperCase() || '';
+        option.style.display = optionText.includes(searchTerm) ? '' : 'none';
+    }
+}
+
+function applyFiltersAndRender() {
+    // ... (código original sem alterações, pois ele lê do estado global `originalData`) ...
+    showLoading();
+    activeRiskFilter = null; 
+    updateSummaryCardStyles();
+    setTimeout(() => {
+        const selectedPOs = getSelectedOptions(poFilter).map(v => v.toUpperCase());
+        const selectedVessels = getSelectedOptions(vesselFilter).map(v => v.toUpperCase());
+        const selectedStatuses = getSelectedOptions(statusFilter).map(v => v.toUpperCase());
+        const selectedFinalStatuses = getSelectedOptions(finalStatusFilter).map(v => v.toUpperCase());
+        const selectedCargoTypes = getSelectedOptions(cargoTypeFilter).map(v => v.toUpperCase());
+        const selectedShipowners = getSelectedOptions(shipownerFilter).map(v => v.toUpperCase());
+        const selectedLoadingTypes = getSelectedOptions(loadingTypeFilter).map(v => v.toUpperCase());
+        filteredDataCache = originalData.filter(row => 
+            (selectedPOs.length === 0 || selectedPOs.includes(String(row['PO SAP'] || '').toUpperCase())) &&
+            (selectedVessels.length === 0 || selectedVessels.includes(String(row['ARRIVAL VESSEL'] || '').toUpperCase())) &&
+            (selectedStatuses.length === 0 || selectedStatuses.includes(String(row['STATUS CNTR WAREHOUSE'] || '').toUpperCase())) &&
+            (selectedFinalStatuses.length === 0 || selectedFinalStatuses.includes(String(row['STATUS'] || '').toUpperCase())) &&
+            (selectedCargoTypes.length === 0 || selectedCargoTypes.includes(String(row['TYPE OF CARGO'] || '').toUpperCase())) &&
+            (selectedShipowners.length === 0 || selectedShipowners.includes(String(row['SHIPOWNER'] || '').toUpperCase())) &&
+            (selectedLoadingTypes.length === 0 || selectedLoadingTypes.includes(String(row['LOADING TYPE'] || '').toUpperCase()))
+        );
+        setViewUI(currentView);
+        totalFclCount.textContent = filteredDataCache.length.toString();
+        hideLoading();
+    }, 50);
+}
+
+function resetFiltersAndRender() {
+    // ... (código original sem alterações) ...
+    showLoading();
+    setTimeout(() => {
+        [poFilter, vesselFilter, statusFilter, finalStatusFilter, cargoTypeFilter, shipownerFilter, loadingTypeFilter].forEach(sel => sel.selectedIndex = -1);
+        vesselSearchInput.value = '';
+        filterVesselOptions();
+        shipownerSearchInput.value = '';
+        filterShipownerOptions();
+        applyFiltersAndRender();
+        hideLoading();
+    }, 50);
+}
+
+function processDataForView(data: any[]) {
+    // ... (código original sem alterações) ...
+    const groupByKeyMap = { vessel: 'ARRIVAL VESSEL', po: 'PO SAP', warehouse: 'BONDED WAREHOUSE' };
+    const groupByKey = groupByKeyMap[currentView as 'vessel' | 'po' | 'warehouse'];
+    const defaultName = `Sem ${groupByKey}`.toUpperCase();
+    const grouped = data.reduce((acc, row) => {
+        const name = (row[groupByKey] ? String(row[groupByKey]).trim().toUpperCase() : defaultName) || defaultName;
+        if (!acc[name]) acc[name] = [];
+        acc[name].push(row);
+        return acc;
+    }, {} as Record<string, any[]>);
+    return Object.entries(grouped).map(([name, containers]) => {
+        const processed = containers.map(c => {
+            const risk = getContainerRisk(c);
+            const deadline = excelDateToJSDate(c['DEADLINE RETURN CNTR']);
+            const daysToDeadline = deadline ? Math.ceil((deadline.getTime() - TODAY.getTime()) / (1000 * 3600 * 24)) : null;
+            return { ...c, daysToDeadline, risk };
+        });
+        const hasHighRisk = processed.some(c => c.risk === 'high');
+        const hasMediumRisk = processed.some(c => c.risk === 'medium');
+        const isAllDelivered = processed.every(c => c.risk === 'none');
+        let overallRisk: RiskCategory | 'low' = 'low';
+        if(isAllDelivered) overallRisk = 'none';
+        else if(hasHighRisk) overallRisk = 'high';
+        else if(hasMediumRisk) overallRisk = 'medium';
+        return { name, containers: processed, totalFCL: containers.length, overallRisk };
+    }).sort((a, b) => {
+        const riskOrder = { high: 0, medium: 1, low: 2, none: 3 };
+        return riskOrder[a.overallRisk as keyof typeof riskOrder] - riskOrder[b.overallRisk as keyof typeof riskOrder];
+    });
+}
+
+function setView(view: View) {
+    // ... (código original sem alterações) ...
+    if (currentView === view) return;
+    if (currentView === 'buffer') {
+        bufferSearchInput.value = '';
+    }
+    currentView = view;
+    document.querySelectorAll('#view-tabs-container button').forEach(btn => btn.classList.remove('active'));
+    document.getElementById(`view-${view}-btn`)?.classList.add('active');
+    if (originalData.length > 0) setViewUI(view);
+}
+
+function setViewUI(view: View) {
+    // ... (código original sem alterações) ...
+    planConfigContainer.classList.add('hidden');
+    bufferConfigContainer.classList.add('hidden');
+    chartsContainer.classList.add('hidden');
+    summaryContainer.classList.add('hidden');
+    exportPdfBtn.classList.add('hidden');
+    if (view === 'plan') {
+        planConfigContainer.classList.remove('hidden');
+        renderDeliveryPlanView(filteredDataCache);
+    } else if (view === 'buffer') {
+        bufferConfigContainer.classList.remove('hidden');
+        renderBufferControlView(filteredDataCache);
+    } else {
+        chartsContainer.classList.remove('hidden');
+        summaryContainer.classList.remove('hidden');
+        exportPdfBtn.classList.remove('hidden');
+        renderSummary(filteredDataCache);
+        const processedData = processDataForView(filteredDataCache);
+        renderDashboard(processedData);
+        renderCharts(processedData, filteredDataCache);
+    }
+}
+
+function renderSummary(filteredData: any[]) {
+    // ... (código original sem alterações) ...
+    const summaryCounts: Record<RiskCategory, number> = { high: 0, medium: 0, low: 0, none: 0 };
+    for (const row of filteredData) {
+        summaryCounts[getContainerRisk(row)]++;
+    }
+    highRiskCount.textContent = summaryCounts.high.toString();
+    mediumRiskCount.textContent = summaryCounts.medium.toString();
+    lowRiskCount.textContent = summaryCounts.low.toString();
+    noneRiskCount.textContent = summaryCounts.none.toString();
+}
+
+function renderDashboard(dataToRender: any[]) {
+    // ... (código original sem alterações) ...
+    dashboardGrid.innerHTML = '';
+    dashboardGrid.className = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6';
+    if (!Array.isArray(dataToRender) || dataToRender.length === 0) {
+        placeholder.classList.remove('hidden');
+        return;
+    }
+    placeholder.classList.add('hidden');
+    dataToRender.forEach(item => {
+        const card = createDashboardCard(item);
+        card.addEventListener('click', () => openModal(item));
+        dashboardGrid.appendChild(card);
+    });
+}
+
+function createDashboardCard(item: any) {
+    // ... (código original sem alterações) ...
+    const card = document.createElement('div');
+    card.className = `card risk-${item.overallRisk} bg-white dark:bg-slate-800`;
+    card.innerHTML = `
+        <div class="p-4">
+            <h3 class="font-extrabold text-lg text-gray-800 dark:text-slate-100 truncate">${currentView === 'po' ? 'PO: ' : ''}${item.name}</h3>
+            <p class="text-sm text-gray-500 dark:text-slate-400">${item.totalFCL} ${t('containers_unit')}</p>
+        </div>`;
+    return card;
+}
+
+function renderDeliveryPlanView(data: any[]) {
+    // ... (código original sem alterações) ...
+    dashboardGrid.innerHTML = '';
+    dashboardGrid.className = 'grid grid-cols-1 gap-6';
+
+    const containersToSchedule = data
+        .filter(c => getContainerRisk(c) !== 'none')
+        .map(c => {
+            const deadline = excelDateToJSDate(c['DEADLINE RETURN CNTR']);
+            const daysToDeadline = deadline ? Math.ceil((deadline.getTime() - TODAY.getTime()) / (1000 * 3600 * 24)) : null;
+            return { ...c, daysToDeadline, risk: getContainerRisk(c) };
+        })
+        .sort((a, b) => (a.daysToDeadline ?? Infinity) - (b.daysToDeadline ?? Infinity));
+
+    if (containersToSchedule.length === 0) {
+        dashboardGrid.innerHTML = `
+            <div class="col-span-full text-center py-20 bg-white dark:bg-slate-800 rounded-lg shadow">
+                <i class="fas fa-check-circle text-6xl text-green-400 mb-4"></i>
+                <h2 class="text-2xl font-semibold text-gray-600 dark:text-slate-300">${t('plan_no_pending')}</h2>
+                <p class="text-gray-400 dark:text-slate-500">${t('plan_no_pending_subtitle')}</p>
+            </div>`;
+        return;
+    }
+
+    deliveryPlanCache = {};
+    const dailyCapacity = parseInt(dailyCapacityInput.value, 10) || 100;
+    let scheduleDate = new Date(TODAY);
+    for (const container of containersToSchedule) {
+        let scheduled = false;
+        while(!scheduled) {
+            while (scheduleDate.getDay() === 0 || scheduleDate.getDay() === 6) {
+                scheduleDate.setDate(scheduleDate.getDate() + 1);
+            }
+            const dateString = scheduleDate.toISOString().split('T')[0];
+            if (!deliveryPlanCache[dateString]) {
+                deliveryPlanCache[dateString] = [];
+            }
+            if (deliveryPlanCache[dateString].length < dailyCapacity) {
+                deliveryPlanCache[dateString].push(container);
+                scheduled = true;
+            } else {
+                scheduleDate.setDate(scheduleDate.getDate() + 1);
+            }
+        }
+    }
+    
+    let planHtml = '';
+    const headers = ['#', 'Contêiner', 'Prazo Retorno', 'Dias Restantes', 'Navio', 'PO SAP', 'Armazém'];
+    const tableHeader = headers.map(h => `<th class="px-2 py-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase">${h}</th>`).join('');
+    
+    for (const [date, daySchedule] of Object.entries(deliveryPlanCache).sort((a, b) => a[0].localeCompare(b[0]))) {
+
+        const formattedDate = new Date(date).toLocaleDateString('pt-BR', { timeZone: 'UTC', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+        
+        const tableRows = daySchedule.map((c: any, index: number) => {
+            const daysText = c.daysToDeadline !== null ? `<span class="font-bold ${c.daysToDeadline < 0 ? 'text-red-600' : ''}">${c.daysToDeadline}</span>` : 'N/A';
+            return `<tr class="border-b dark:border-slate-700 row-risk-${c.risk}">
+                <td class="px-2 py-1.5 text-xs text-center">${index + 1}</td>
+                <td class="px-2 py-1.5 text-xs font-semibold">${c['CNTRS ORIGINAL'] || ''}</td>
+                <td class="px-2 py-1.5 text-xs">${formatDate(c['DEADLINE RETURN CNTR'])}</td>
+                <td class="px-2 py-1.5 text-xs text-center">${daysText}</td>
+                <td class="px-2 py-1.5 text-xs">${c['ARRIVAL VESSEL'] || ''}</td>
+                <td class="px-2 py-1.5 text-xs">${c['PO SAP'] || ''}</td>
+                <td class="px-2 py-1.5 text-xs">${c['BONDED WAREHOUSE'] || ''}</td>
+            </tr>`;
+        }).join('');
+
+        planHtml += `
+            <div class="bg-white dark:bg-slate-800 rounded-lg shadow-md overflow-hidden col-span-full">
+                <div class="p-4 bg-gray-50 dark:bg-slate-700/50 border-b dark:border-slate-700 flex justify-between items-center">
+                    <div>
+                        <h3 class="text-lg font-bold text-gray-800 dark:text-slate-100">${t('plan_daily_schedule_for')} ${formattedDate}</h3>
+                        <p class="text-sm text-gray-600 dark:text-slate-400">${daySchedule.length} ${t('containers_unit')}</p>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button class="export-plan-btn bg-red-600 text-white px-3 py-1.5 text-xs rounded-md shadow-sm hover:bg-red-700" data-date="${date}" data-format="pdf">
+                            <i class="fas fa-file-pdf mr-1"></i> ${t('plan_export_pdf')}
+                        </button>
+                        <button class="export-plan-btn bg-green-600 text-white px-3 py-1.5 text-xs rounded-md shadow-sm hover:bg-green-700" data-date="${date}" data-format="excel">
+                            <i class="fas fa-file-excel mr-1"></i> ${t('plan_export_excel')}
+                        </button>
+                    </div>
+                </div>
+                <div class="table-responsive p-4">
+                    <table class="min-w-full text-sm">
+                        <thead><tr>${tableHeader}</tr></thead>
+                        <tbody>${tableRows}</tbody>
+                    </table>
+                </div>
+            </div>`;
+    }
+    dashboardGrid.innerHTML = planHtml;
+}
+
+function renderBufferControlView(data: any[]) {
+    // ... (código original sem alterações) ...
+    dashboardGrid.innerHTML = '';
+    dashboardGrid.className = 'grid grid-cols-1 gap-6';
+
+    const searchTerm = bufferSearchInput.value.toUpperCase();
+    const capacity = parseInt(bufferCapacityInput.value, 10) || 400;
+    const inBufferCount = containersInBuffer.size;
+    const availableSpace = capacity - inBufferCount;
+    
+    const allAtFacility = data.filter(c => !containersInBuffer.has(c['CNTRS ORIGINAL']));
+    const allInBuffer = data.filter(c => containersInBuffer.has(c['CNTRS ORIGINAL']));
+    
+    const atFacilityContainers = allAtFacility.filter(c => 
+        searchTerm === '' || String(c['CNTRS ORIGINAL'] || '').toUpperCase().includes(searchTerm)
+    );
+    const inBufferContainers = allInBuffer.filter(c => 
+        searchTerm === '' || String(c['CNTRS ORIGINAL'] || '').toUpperCase().includes(searchTerm)
+    );
+
+    const statsHtml = `
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-6">
+        <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow flex items-center border-l-4 border-blue-500">
+            <div class="p-3 rounded-full bg-blue-100 mr-4"><i class="fas fa-boxes text-blue-600 fa-lg"></i></div>
+            <div><p class="text-sm font-medium text-gray-500 dark:text-slate-400 uppercase" data-translate-key="buffer_total_capacity">${t('buffer_total_capacity')}</p><p class="text-2xl font-bold text-gray-800 dark:text-slate-100">${capacity}</p></div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow flex items-center border-l-4 border-purple-500">
+            <div class="p-3 rounded-full bg-purple-100 mr-4"><i class="fas fa-layer-group text-purple-600 fa-lg"></i></div>
+            <div><p class="text-sm font-medium text-gray-500 dark:text-slate-400 uppercase" data-translate-key="buffer_in_buffer">${t('buffer_in_buffer')}</p><p class="text-2xl font-bold text-gray-800 dark:text-slate-100">${inBufferCount}</p></div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow flex items-center border-l-4 border-green-500">
+            <div class="p-3 rounded-full bg-green-100 mr-4"><i class="fas fa-check-circle text-green-600 fa-lg"></i></div>
+            <div><p class="text-sm font-medium text-gray-500 dark:text-slate-400 uppercase" data-translate-key="buffer_available_space">${t('buffer_available_space')}</p><p class="text-2xl font-bold text-gray-800 dark:text-slate-100">${availableSpace}</p></div>
+        </div>
+        <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow flex items-center border-l-4 border-yellow-500">
+            <div class="p-3 rounded-full bg-yellow-100 mr-4"><i class="fas fa-industry text-yellow-600 fa-lg"></i></div>
+            <div><p class="text-sm font-medium text-gray-500 dark:text-slate-400 uppercase" data-translate-key="buffer_at_facility">${t('buffer_at_facility')}</p><p class="text-2xl font-bold text-gray-800 dark:text-slate-100">${allAtFacility.length}</p></div>
+        </div>
+    </div>`;
+
+    const createTable = (titleKey: keyof typeof translations.pt, containers: any[], action: 'add' | 'remove') => {
+        const headers = ['Contêiner', 'Navio', 'PO SAP', 'Ação'];
+        const buttonText = action === 'add' ? t('buffer_move_to') : t('buffer_remove_from');
+        const buttonClass = action === 'add' ? 'bg-blue-500 hover:bg-blue-600' : 'bg-red-500 hover:bg-red-600';
+
+        const tableRows = containers.map(c => `
+            <tr class="border-b dark:border-slate-700">
+                <td class="p-2 text-xs font-semibold">${c['CNTRS ORIGINAL'] || ''}</td>
+                <td class="p-2 text-xs">${c['ARRIVAL VESSEL'] || ''}</td>
+                <td class="p-2 text-xs">${c['PO SAP'] || ''}</td>
+                <td class="p-2 text-xs text-right">
+                    <button class="buffer-action-btn text-white px-2 py-1 rounded text-xs ${buttonClass}" data-id="${c['CNTRS ORIGINAL']}" data-action="${action}">
+                       ${buttonText}
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+
+        return `
+            <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow">
+                <h3 class="text-xl font-bold mb-2 text-gray-700 dark:text-slate-200">${t(titleKey)}</h3>
+                <div class="buffer-table-container">
+                    <table class="min-w-full text-sm">
+                        <thead class="bg-gray-50 dark:bg-slate-700"><tr>${headers.map(h => `<th class="p-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase">${h}</th>`).join('')}</tr></thead>
+                        <tbody>${tableRows}</tbody>
+                    </table>
+                </div>
+            </div>`;
+    };
+
+    const tablesHtml = `
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            ${createTable('buffer_facility_list_title', atFacilityContainers, 'add')}
+            ${createTable('buffer_buffer_list_title', inBufferContainers, 'remove')}
+        </div>
+    `;
+
+    dashboardGrid.innerHTML = statsHtml + tablesHtml;
+}
+
+function renderCharts(processedData: any[], filteredData: any[]) {
+    // ... (código original sem alterações) ...
+    const viewKeyMap = { vessel: 'view_by_vessel', po: 'view_by_po', warehouse: 'view_by_warehouse' } as const;
+    barChartTitle.textContent = t(viewKeyMap[currentView as keyof typeof viewKeyMap]);
+
+    const updateChart = (chartId: string, type: any, data: any, options: any) => {
+        const ctx = (document.getElementById(chartId) as HTMLCanvasElement)?.getContext('2d');
+        if (!ctx) return;
+        if (charts[chartId]) charts[chartId].destroy();
+        charts[chartId] = new Chart(ctx, { type, data, options });
+    };
+
+    const safeProcessedData = Array.isArray(processedData) ? processedData : [];
+    const barData = {
+        labels: safeProcessedData.map(item => item.name),
+        datasets: [{ label: 'Total de Contêineres', data: safeProcessedData.map(item => item.totalFCL), backgroundColor: 'rgba(59, 130, 246, 0.7)' }]
+    };
+    updateChart('main-bar-chart', 'bar', barData, { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } } });
+    
+    const safeFilteredData = Array.isArray(filteredData) ? filteredData : [];
+    const statusCounts = safeFilteredData.reduce((acc, row) => {
+        const status = row['STATUS CNTR WAREHOUSE'] || 'Sem Status';
+        acc[status] = (acc[status] || 0) + 1;
+        return acc;
+    }, {} as Record<string, number>);
+    const pieData = {
+        labels: Object.keys(statusCounts),
+        datasets: [{ data: Object.values(statusCounts), backgroundColor: ['#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e', '#10b981', '#14b8a6', '#3b82f6', '#8b5cf6', '#a855f7'] }]
+    };
+    updateChart('status-pie-chart', 'pie', pieData, { responsive: true, plugins: { legend: { position: 'right' } } });
+
+    const deadlineGroups = safeFilteredData.reduce((acc, row) => {
+        if ((row['STATUS']||'').toLowerCase().includes('entregue')) return acc;
+        const deadline = excelDateToJSDate(row['DEADLINE RETURN CNTR']);
+        if (!deadline) return acc;
+        const days = Math.ceil((deadline.getTime() - TODAY.getTime()) / (1000 * 3600 * 24));
+        let group = '31+ dias';
+        if (days < 0) group = 'Atrasado';
+        else if (days <= 7) group = '0-7 dias';
+        else if (days <= 15) group = '8-15 dias';
+        else if (days <= 30) group = '16-30 dias';
+        acc[group] = (acc[group] || 0) + 1;
+        return acc;
+    }, {} as Record<string, number>);
+    const deadlineLabels = ['Atrasado', '0-7 dias', '8-15 dias', '16-30 dias', '31+ dias'];
+    const deadlineData = {
+        labels: deadlineLabels,
+        datasets: [{ label: 'Nº de Contêineres', data: deadlineLabels.map(l => deadlineGroups[l] || 0), backgroundColor: ['#dc2626', '#f97316', '#facc15', '#84cc16', '#22c55e'] }]
+    };
+    updateChart('deadline-distribution-chart', 'bar', deadlineData, { responsive: true, plugins: { legend: { display: false } } });
+}
+
+function populateFilters(data: any[]) {
+    // ... (código original sem alterações) ...
+    const createOptions = (arr: string[]) => arr.map(item => `<option value="${item}">${item}</option>`).join('');
+    const unique = (key: string) => {
+        const seen = new Map<string, string>();
+        for (const row of data) {
+            const originalValue = String(row[key] || '').trim();
+            if (originalValue) {
+                const normalizedValue = originalValue.toUpperCase();
+                if (!seen.has(normalizedValue)) seen.set(normalizedValue, originalValue);
+            }
+        }
+        return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    };
+    poFilter.innerHTML = createOptions(unique('PO SAP'));
+    vesselFilter.innerHTML = createOptions(unique('ARRIVAL VESSEL'));
+    statusFilter.innerHTML = createOptions(unique('STATUS CNTR WAREHOUSE'));
+    finalStatusFilter.innerHTML = createOptions(unique('STATUS'));
+    cargoTypeFilter.innerHTML = createOptions(unique('TYPE OF CARGO'));
+    shipownerFilter.innerHTML = createOptions(unique('SHIPOWNER'));
+    loadingTypeFilter.innerHTML = createOptions(unique('LOADING TYPE'));
+}
+
+function showDashboard() {
+    // ... (código original sem alterações) ...
+    filterContainer.classList.remove('hidden');
+    viewTabsContainer.classList.remove('hidden');
+    exportPdfBtn.classList.remove('hidden');
+    clearDataBtn.classList.remove('hidden');
+    totalFclDisplay.classList.remove('hidden');
+}
+
+function resetUI() {
+    // ... (código original sem alterações) ...
+    dashboardGrid.innerHTML = '';
+    placeholder.classList.remove('hidden');
+    filterContainer.classList.add('hidden');
+    chartsContainer.classList.add('hidden');
+    summaryContainer.classList.add('hidden');
+    viewTabsContainer.classList.add('hidden');
+    exportPdfBtn.classList.add('hidden');
+    clearDataBtn.classList.add('hidden');
+    totalFclDisplay.classList.add('hidden');
+    planConfigContainer.classList.add('hidden');
+    bufferConfigContainer.classList.add('hidden');
+    originalData = [];
+    containersInBuffer.clear();
+    Object.values(charts).forEach(chart => chart.destroy());
+    charts = {};
+    lastUpdate.textContent = t('upload_prompt_initial');
+    setView('vessel');
+}
+
+function formatDate(dateString: any): string {
+    // ... (código original sem alterações) ...
+    const date = excelDateToJSDate(dateString);
+    if (!date) return 'N/A';
+    return date.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+}
+
+function handleSummaryCardClick(event: Event) {
+    // ... (código original sem alterações) ...
+    const card = (event.target as HTMLElement).closest('.summary-card') as HTMLElement;
+    if (!card || currentView === 'plan' || currentView === 'buffer') return;
+    const risk = card.dataset.risk as RiskCategory;
+    activeRiskFilter = activeRiskFilter === risk ? null : risk;
+    updateSummaryCardStyles();
+    const chartRawDataToRender = activeRiskFilter ? filteredDataCache.filter(row => getContainerRisk(row) === activeRiskFilter) : filteredDataCache;
+    let gridDataToRender = processDataForView(filteredDataCache);
+    if (activeRiskFilter) {
+        gridDataToRender = gridDataToRender.map(group => {
+            const filteredContainers = group.containers.filter((c: any) => c.risk === activeRiskFilter);
+            return { ...group, containers: filteredContainers, totalFCL: filteredContainers.length };
+        }).filter(group => group.totalFCL > 0);
+    }
+    renderDashboard(gridDataToRender);
+    renderCharts(gridDataToRender, chartRawDataToRender);
+}
+
+function updateSummaryCardStyles() {
+    // ... (código original sem alterações) ...
+    summaryContainer.querySelectorAll('.summary-card').forEach(card => {
+        const cardEl = card as HTMLElement;
+        if (cardEl.dataset.risk === activeRiskFilter) cardEl.classList.add('active-summary-card');
+        else cardEl.classList.remove('active-summary-card');
+    });
+}
+
 function handleBufferAction(event: Event) {
     const button = (event.target as HTMLElement).closest('.buffer-action-btn') as HTMLElement;
     if (!button) return;
@@ -461,774 +1029,188 @@ function handleBufferAction(event: Event) {
         containersInBuffer.delete(id);
     }
 
-    // Apenas renderiza a view novamente, sem salvar na nuvem
-    renderBufferControlView(filteredDataCache);
+    // MODIFICADO: Sincroniza a mudança do buffer com o Firestore
+    sincronizarComFirestore();
 }
 
-
-// --- TODO O RESTANTE DO CÓDIGO (funções de renderização, etc.) permanece O MESMO ---
-// ... cole aqui o resto do seu código, começando da função `showLoading()`
-// e indo até o final. Nenhuma outra alteração é necessária.
-function showLoading() { loadingOverlay.classList.remove('hidden'); }
-function hideLoading() { loadingOverlay.classList.add('hidden'); }
-
-function showToast(message: string, type: 'success' | 'error' | 'warning' = 'success') {
-    const toastContainer = document.getElementById('toast-container');
-    if (!toastContainer) return;
-
-    const toast = document.createElement('div');
-    const icons = { success: 'fa-check-circle', error: 'fa-times-circle', warning: 'fa-exclamation-triangle' };
-    const colors = { success: 'bg-green-500', error: 'bg-red-500', warning: 'bg-yellow-500' };
-    toast.className = `toast ${colors[type]} text-white py-3 px-5 rounded-lg shadow-xl flex items-center mb-2`;
-    toast.innerHTML = `<i class="fas ${icons[type]} mr-3"></i> <p>${message}</p>`;
-    toastContainer.appendChild(toast);
-    setTimeout(() => toast.remove(), 5000);
-}
-
-function initializeTheme() {
-    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) as 'light' | 'dark' | null;
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const theme = savedTheme || (prefersDark ? 'dark' : 'light');
-    applyTheme(theme);
-}
-
-function toggleTheme() {
-    const isDark = document.documentElement.classList.contains('dark');
-    const newTheme = isDark ? 'light' : 'dark';
-    localStorage.setItem(THEME_STORAGE_KEY, newTheme);
-    applyTheme(newTheme);
-}
-
-function applyTheme(theme: 'light' | 'dark') {
-    const themeToggleIcon = document.getElementById('theme-toggle-icon') as HTMLElement;
-    if (theme === 'dark') {
-        document.documentElement.classList.add('dark');
-        themeToggleIcon.classList.remove('fa-moon');
-        themeToggleIcon.classList.add('fa-sun');
-    } else {
-        document.documentElement.classList.remove('dark');
-        themeToggleIcon.classList.remove('fa-sun');
-        themeToggleIcon.classList.add('fa-moon');
-    }
-
-    const isDarkMode = theme === 'dark';
-    Chart.defaults.color = isDarkMode ? '#cbd5e1' : '#64748b'; // slate-300 / slate-500
-    Chart.defaults.borderColor = isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
-
-    if (originalData.length > 0) {
-        applyFiltersAndRender();
-    }
-}
-
-
-function toggleLanguage() {
-    currentLanguage = currentLanguage === 'pt' ? 'zh' : 'pt';
-    translateBtnText.textContent = currentLanguage === 'pt' ? '中文' : 'Português';
-    translateUI();
-}
-
-function translateUI() {
-    document.querySelectorAll('[data-translate-key]').forEach(el => {
-        const key = el.getAttribute('data-translate-key') as keyof typeof translations.pt;
-        if (key) {
-           t(key, el as HTMLElement);
-        }
-    });
-    if (originalData.length > 0) {
-        applyFiltersAndRender();
-        if (activeModalItem) {
-            renderModalContent();
-        }
-    }
-}
-
-
-function excelDateToJSDate(serial: any): Date | null {
-    if (serial === null || serial === undefined || serial === '') return null;
-    if (typeof serial === 'string') {
-        if (/^\d{5}$/.test(serial)) { serial = parseInt(serial, 10); }
-        else {
-            const parts = serial.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
-            if (parts) {
-                const date = new Date(Date.UTC(Number(parts[3]), Number(parts[2]) - 1, Number(parts[1])));
-                return isNaN(date.getTime()) ? null : date;
-            }
-            const fallbackDate = new Date(serial);
-            return isNaN(fallbackDate.getTime()) ? null : fallbackDate;
-        }
-    }
-    if (typeof serial === 'number' && serial >= 1) {
-        const utc_days = Math.floor(serial - 25569);
-        const date_info = new Date(utc_days * 86400 * 1000);
-        return new Date(date_info.getTime() + (date_info.getTimezoneOffset() * 60 * 1000));
-    }
-    return null;
-}
-
-function getContainerRisk(container: any): RiskCategory {
-    const isDelivered = (container['STATUS'] || '').toLowerCase().includes('entregue');
-    if (isDelivered) return 'none';
-    const deadline = excelDateToJSDate(container['DEADLINE RETURN CNTR']);
-    if (deadline) {
-        const daysToDeadline = Math.ceil((deadline.getTime() - TODAY.getTime()) / (1000 * 3600 * 24));
-        if (daysToDeadline < 0) return 'high';
-        if (daysToDeadline <= 7) return 'medium';
-    }
-    return 'low';
-}
-
-function getSelectedOptions(select: HTMLSelectElement) { return Array.from(select.selectedOptions).map(opt => opt.value); }
-
-function filterVesselOptions() {
-    const searchTerm = vesselSearchInput.value.toUpperCase();
-    const options = vesselFilter.options;
-    for (let i = 0; i < options.length; i++) {
-        const option = options[i] as HTMLOptionElement;
-        const optionText = option.textContent?.toUpperCase() || '';
-        option.style.display = optionText.includes(searchTerm) ? '' : 'none';
-    }
-}
-
-function filterShipownerOptions() {
-    const searchTerm = shipownerSearchInput.value.toUpperCase();
-    const options = shipownerFilter.options;
-    for (let i = 0; i < options.length; i++) {
-        const option = options[i] as HTMLOptionElement;
-        const optionText = option.textContent?.toUpperCase() || '';
-        option.style.display = optionText.includes(searchTerm) ? '' : 'none';
-    }
-}
-
-function applyFiltersAndRender() {
-    showLoading();
-    activeRiskFilter = null; 
-    updateSummaryCardStyles();
-
-    setTimeout(() => {
-        const selectedPOs = getSelectedOptions(poFilter).map(v => v.toUpperCase());
-        const selectedVessels = getSelectedOptions(vesselFilter).map(v => v.toUpperCase());
-        const selectedStatuses = getSelectedOptions(statusFilter).map(v => v.toUpperCase());
-        const selectedFinalStatuses = getSelectedOptions(finalStatusFilter).map(v => v.toUpperCase());
-        const selectedCargoTypes = getSelectedOptions(cargoTypeFilter).map(v => v.toUpperCase());
-        const selectedShipowners = getSelectedOptions(shipownerFilter).map(v => v.toUpperCase());
-        const selectedLoadingTypes = getSelectedOptions(loadingTypeFilter).map(v => v.toUpperCase());
-
-        filteredDataCache = originalData.filter(row => 
-            (selectedPOs.length === 0 || selectedPOs.includes(String(row['PO SAP'] || '').toUpperCase())) &&
-            (selectedVessels.length === 0 || selectedVessels.includes(String(row['ARRIVAL VESSEL'] || '').toUpperCase())) &&
-            (selectedStatuses.length === 0 || selectedStatuses.includes(String(row['STATUS CNTR WAREHOUSE'] || '').toUpperCase())) &&
-            (selectedFinalStatuses.length === 0 || selectedFinalStatuses.includes(String(row['STATUS'] || '').toUpperCase())) &&
-            (selectedCargoTypes.length === 0 || selectedCargoTypes.includes(String(row['TYPE OF CARGO'] || '').toUpperCase())) &&
-            (selectedShipowners.length === 0 || selectedShipowners.includes(String(row['SHIPOWNER'] || '').toUpperCase())) &&
-            (selectedLoadingTypes.length === 0 || selectedLoadingTypes.includes(String(row['LOADING TYPE'] || '').toUpperCase()))
-        );
-        
-        setViewUI(currentView);
-        
-        totalFclCount.textContent = filteredDataCache.length.toString();
-        hideLoading();
-    }, 50);
-}
-
-function resetFiltersAndRender() {
-    showLoading();
-    setTimeout(() => {
-        [poFilter, vesselFilter, statusFilter, finalStatusFilter, cargoTypeFilter, shipownerFilter, loadingTypeFilter].forEach(sel => sel.selectedIndex = -1);
-        vesselSearchInput.value = '';
-        filterVesselOptions();
-        shipownerSearchInput.value = '';
-        filterShipownerOptions();
-        applyFiltersAndRender();
-        hideLoading();
-    }, 50);
-}
-
-function processDataForView(data: any[]) {
-    const groupByKeyMap = { vessel: 'ARRIVAL VESSEL', po: 'PO SAP', warehouse: 'BONDED WAREHOUSE' };
-    const groupByKey = groupByKeyMap[currentView as 'vessel' | 'po' | 'warehouse'];
-    const defaultName = `Sem ${groupByKey}`.toUpperCase();
-    
-    const grouped = data.reduce((acc, row) => {
-        const name = (row[groupByKey] ? String(row[groupByKey]).trim().toUpperCase() : defaultName) || defaultName;
-        if (!acc[name]) acc[name] = [];
-        acc[name].push(row);
-        return acc;
-    }, {} as Record<string, any[]>);
-
-    return Object.entries(grouped).map(([name, containers]) => {
-        const processed = containers.map(c => {
-            const risk = getContainerRisk(c);
-            const deadline = excelDateToJSDate(c['DEADLINE RETURN CNTR']);
-            const daysToDeadline = deadline ? Math.ceil((deadline.getTime() - TODAY.getTime()) / (1000 * 3600 * 24)) : null;
-            return { ...c, daysToDeadline, risk };
-        });
-        const hasHighRisk = processed.some(c => c.risk === 'high');
-        const hasMediumRisk = processed.some(c => c.risk === 'medium');
-        const isAllDelivered = processed.every(c => c.risk === 'none');
-        let overallRisk: RiskCategory | 'low' = 'low';
-        if(isAllDelivered) overallRisk = 'none';
-        else if(hasHighRisk) overallRisk = 'high';
-        else if(hasMediumRisk) overallRisk = 'medium';
-        return { name, containers: processed, totalFCL: containers.length, overallRisk };
-    }).sort((a, b) => {
-        const riskOrder = { high: 0, medium: 1, low: 2, none: 3 };
-        return riskOrder[a.overallRisk as keyof typeof riskOrder] - riskOrder[b.overallRisk as keyof typeof riskOrder];
-    });
-}
-
-function setView(view: View) {
-    if (currentView === view) return;
-    if (currentView === 'buffer') {
-        bufferSearchInput.value = '';
-    }
-    currentView = view;
-    document.querySelectorAll('#view-tabs-container button').forEach(btn => btn.classList.remove('active'));
-    document.getElementById(`view-${view}-btn`)?.classList.add('active');
-    if (originalData.length > 0) setViewUI(view);
-}
-
-function setViewUI(view: View) {
-    planConfigContainer.classList.add('hidden');
-    bufferConfigContainer.classList.add('hidden');
-    chartsContainer.classList.add('hidden');
-    summaryContainer.classList.add('hidden');
-    exportPdfBtn.classList.add('hidden');
-    
-    if (view === 'plan') {
-        planConfigContainer.classList.remove('hidden');
-        renderDeliveryPlanView(filteredDataCache);
-    } else if (view === 'buffer') {
-        bufferConfigContainer.classList.remove('hidden');
-        renderBufferControlView(filteredDataCache);
-    } else {
-        chartsContainer.classList.remove('hidden');
-        summaryContainer.classList.remove('hidden');
-        exportPdfBtn.classList.remove('hidden');
-        renderSummary(filteredDataCache);
-        const processedData = processDataForView(filteredDataCache);
-        renderDashboard(processedData);
-        renderCharts(processedData, filteredDataCache);
-    }
-}
-
-function renderSummary(filteredData: any[]) {
-    const summaryCounts: Record<RiskCategory, number> = { high: 0, medium: 0, low: 0, none: 0 };
-    for (const row of filteredData) {
-        summaryCounts[getContainerRisk(row)]++;
-    }
-    highRiskCount.textContent = summaryCounts.high.toString();
-    mediumRiskCount.textContent = summaryCounts.medium.toString();
-    lowRiskCount.textContent = summaryCounts.low.toString();
-    noneRiskCount.textContent = summaryCounts.none.toString();
-}
-
-function renderDashboard(dataToRender: any[]) {
-    dashboardGrid.innerHTML = '';
-    dashboardGrid.className = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6';
-    if (!Array.isArray(dataToRender) || dataToRender.length === 0) {
-        placeholder.classList.remove('hidden');
-        return;
-    }
-    placeholder.classList.add('hidden');
-    dataToRender.forEach(item => {
-        const card = createDashboardCard(item);
-        card.addEventListener('click', () => openModal(item));
-        dashboardGrid.appendChild(card);
-    });
-}
-
-function createDashboardCard(item: any) {
-    const card = document.createElement('div');
-    card.className = `card risk-${item.overallRisk} bg-white dark:bg-slate-800`;
-    card.innerHTML = `
-        <div class="p-4">
-            <h3 class="font-extrabold text-lg text-gray-800 dark:text-slate-100 truncate">${currentView === 'po' ? 'PO: ' : ''}${item.name}</h3>
-            <p class="text-sm text-gray-500 dark:text-slate-400">${item.totalFCL} ${t('containers_unit')}</p>
-        </div>`;
-    return card;
-}
-
-function renderDeliveryPlanView(data: any[]) {
-    dashboardGrid.innerHTML = '';
-    dashboardGrid.className = 'grid grid-cols-1 gap-6';
-
-    const containersToSchedule = data
-        .filter(c => getContainerRisk(c) !== 'none')
-        .map(c => {
-            const deadline = excelDateToJSDate(c['DEADLINE RETURN CNTR']);
-            const daysToDeadline = deadline ? Math.ceil((deadline.getTime() - TODAY.getTime()) / (1000 * 3600 * 24)) : null;
-            return { ...c, daysToDeadline, risk: getContainerRisk(c) };
-        })
-        .sort((a, b) => (a.daysToDeadline ?? Infinity) - (b.daysToDeadline ?? Infinity));
-
-    if (containersToSchedule.length === 0) {
-        dashboardGrid.innerHTML = `
-            <div class="col-span-full text-center py-20 bg-white dark:bg-slate-800 rounded-lg shadow">
-                <i class="fas fa-check-circle text-6xl text-green-400 mb-4"></i>
-                <h2 class="text-2xl font-semibold text-gray-600 dark:text-slate-300">${t('plan_no_pending')}</h2>
-                <p class="text-gray-400 dark:text-slate-500">${t('plan_no_pending_subtitle')}</p>
-            </div>`;
-        return;
-    }
-
-    deliveryPlanCache = {};
-    const dailyCapacity = parseInt(dailyCapacityInput.value, 10) || 100;
-    let scheduleDate = new Date(TODAY);
-    for (const container of containersToSchedule) {
-        let scheduled = false;
-        while(!scheduled) {
-            // Skip weekends
-            while (scheduleDate.getDay() === 0 || scheduleDate.getDay() === 6) {
-                scheduleDate.setDate(scheduleDate.getDate() + 1);
-            }
-            const dateString = scheduleDate.toISOString().split('T')[0];
-            if (!deliveryPlanCache[dateString]) {
-                deliveryPlanCache[dateString] = [];
-            }
-            if (deliveryPlanCache[dateString].length < dailyCapacity) {
-                deliveryPlanCache[dateString].push(container);
-                scheduled = true;
-            } else {
-                scheduleDate.setDate(scheduleDate.getDate() + 1);
-            }
-        }
-    }
-    
-    let planHtml = '';
-    const headers = ['#', 'Contêiner', 'Prazo Retorno', 'Dias Restantes', 'Navio', 'PO SAP', 'Armazém'];
-    const tableHeader = headers.map(h => `<th class="px-2 py-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase">${h}</th>`).join('');
-    for (const [date, daySchedule] of Object.entries(deliveryPlanCache).sort((a, b) => a[0].localeCompare(b[0]))) {
-
-        const formattedDate = new Date(date).toLocaleDateString('pt-BR', { timeZone: 'UTC', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-        
-        const tableRows = daySchedule.map((c: any, index: number) => {
-            const daysText = c.daysToDeadline !== null ? `<span class="font-bold ${c.daysToDeadline < 0 ? 'text-red-600' : ''}">${c.daysToDeadline}</span>` : 'N/A';
-            return `<tr class="border-b dark:border-slate-700 row-risk-${c.risk}">
-                <td class="px-2 py-1.5 text-xs text-center">${index + 1}</td>
-                <td class="px-2 py-1.5 text-xs font-semibold">${c['CNTRS ORIGINAL'] || ''}</td>
-                <td class="px-2 py-1.5 text-xs">${formatDate(c['DEADLINE RETURN CNTR'])}</td>
-                <td class="px-2 py-1.5 text-xs text-center">${daysText}</td>
-                <td class="px-2 py-1.5 text-xs">${c['ARRIVAL VESSEL'] || ''}</td>
-                <td class="px-2 py-1.5 text-xs">${c['PO SAP'] || ''}</td>
-                <td class="px-2 py-1.5 text-xs">${c['BONDED WAREHOUSE'] || ''}</td>
-            </tr>`;
-        }).join('');
-
-        planHtml += `
-            <div class="bg-white dark:bg-slate-800 rounded-lg shadow-md overflow-hidden col-span-full">
-                <div class="p-4 bg-gray-50 dark:bg-slate-700/50 border-b dark:border-slate-700 flex justify-between items-center">
-                    <div>
-                        <h3 class="text-lg font-bold text-gray-800 dark:text-slate-100">${t('plan_daily_schedule_for')} ${formattedDate}</h3>
-                        <p class="text-sm text-gray-600 dark:text-slate-400">${daySchedule.length} ${t('containers_unit')}</p>
-                    </div>
-                    <div class="flex space-x-2">
-                        <button class="export-plan-btn bg-red-600 text-white px-3 py-1.5 text-xs rounded-md shadow-sm hover:bg-red-700" data-date="${date}" data-format="pdf">
-                            <i class="fas fa-file-pdf mr-1"></i> ${t('plan_export_pdf')}
-                        </button>
-                        <button class="export-plan-btn bg-green-600 text-white px-3 py-1.5 text-xs rounded-md shadow-sm hover:bg-green-700" data-date="${date}" data-format="excel">
-                            <i class="fas fa-file-excel mr-1"></i> ${t('plan_export_excel')}
-                        </button>
-                    </div>
-                </div>
-                <div class="table-responsive p-4">
-                    <table class="min-w-full text-sm">
-                        <thead><tr>${tableHeader}</tr></thead>
-                        <tbody>${tableRows}</tbody>
-                    </table>
-                </div>
-            </div>`;
-    }
-    dashboardGrid.innerHTML = planHtml;
-}
-
-function renderBufferControlView(data: any[]) {
-    dashboardGrid.innerHTML = '';
-    dashboardGrid.className = 'grid grid-cols-1 gap-6';
-
-    const searchTerm = bufferSearchInput.value.toUpperCase();
-    const capacity = parseInt(bufferCapacityInput.value, 10) || 400;
-    const inBufferCount = containersInBuffer.size;
-    const availableSpace = capacity - inBufferCount;
-    
-    const allAtFacility = data.filter(c => !containersInBuffer.has(c['CNTRS ORIGINAL']));
-    const allInBuffer = data.filter(c => containersInBuffer.has(c['CNTRS ORIGINAL']));
-    
-    const atFacilityContainers = allAtFacility.filter(c => 
-        searchTerm === '' || String(c['CNTRS ORIGINAL'] || '').toUpperCase().includes(searchTerm)
-    );
-    const inBufferContainers = allInBuffer.filter(c => 
-        searchTerm === '' || String(c['CNTRS ORIGINAL'] || '').toUpperCase().includes(searchTerm)
-    );
-
-    const statsHtml = `
-    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-6">
-        <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow flex items-center border-l-4 border-blue-500">
-            <div class="p-3 rounded-full bg-blue-100 mr-4"><i class="fas fa-boxes text-blue-600 fa-lg"></i></div>
-            <div><p class="text-sm font-medium text-gray-500 dark:text-slate-400 uppercase" data-translate-key="buffer_total_capacity">${t('buffer_total_capacity')}</p><p class="text-2xl font-bold text-gray-800 dark:text-slate-100">${capacity}</p></div>
-        </div>
-        <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow flex items-center border-l-4 border-purple-500">
-            <div class="p-3 rounded-full bg-purple-100 mr-4"><i class="fas fa-layer-group text-purple-600 fa-lg"></i></div>
-            <div><p class="text-sm font-medium text-gray-500 dark:text-slate-400 uppercase" data-translate-key="buffer_in_buffer">${t('buffer_in_buffer')}</p><p class="text-2xl font-bold text-gray-800 dark:text-slate-100">${inBufferCount}</p></div>
-        </div>
-        <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow flex items-center border-l-4 border-green-500">
-            <div class="p-3 rounded-full bg-green-100 mr-4"><i class="fas fa-check-circle text-green-600 fa-lg"></i></div>
-            <div><p class="text-sm font-medium text-gray-500 dark:text-slate-400 uppercase" data-translate-key="buffer_available_space">${t('buffer_available_space')}</p><p class="text-2xl font-bold text-gray-800 dark:text-slate-100">${availableSpace}</p></div>
-        </div>
-        <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow flex items-center border-l-4 border-yellow-500">
-            <div class="p-3 rounded-full bg-yellow-100 mr-4"><i class="fas fa-industry text-yellow-600 fa-lg"></i></div>
-            <div><p class="text-sm font-medium text-gray-500 dark:text-slate-400 uppercase" data-translate-key="buffer_at_facility">${t('buffer_at_facility')}</p><p class="text-2xl font-bold text-gray-800 dark:text-slate-100">${allAtFacility.length}</p></div>
-        </div>
-    </div>`;
-
-    const createTable = (titleKey: keyof typeof translations.pt, containers: any[], action: 'add' | 'remove') => {
-        const headers = ['Contêiner', 'Navio', 'PO SAP', 'Ação'];
-        const buttonText = action === 'add' ? t('buffer_move_to') : t('buffer_remove_from');
-        const buttonClass = action === 'add' ? 'bg-blue-500 hover:bg-blue-600' : 'bg-red-500 hover:bg-red-500';
-
-        const tableRows = containers.map(c => `
-            <tr class="border-b dark:border-slate-700">
-                <td class="p-2 text-xs font-semibold">${c['CNTRS ORIGINAL'] || ''}</td>
-                <td class="p-2 text-xs">${c['ARRIVAL VESSEL'] || ''}</td>
-                <td class="p-2 text-xs">${c['PO SAP'] || ''}</td>
-                <td class="p-2 text-xs text-right">
-                    <button class="buffer-action-btn text-white px-2 py-1 rounded text-xs ${buttonClass}" data-id="${c['CNTRS ORIGINAL']}" data-action="${action}">
-                       ${buttonText}
-                    </button>
-                </td>
-            </tr>
-        `).join('');
-
-        return `
-            <div class="bg-white dark:bg-slate-800 p-4 rounded-lg shadow">
-                <h3 class="text-xl font-bold mb-2 text-gray-700 dark:text-slate-200">${t(titleKey)}</h3>
-                <div class="buffer-table-container">
-                    <table class="min-w-full text-sm">
-                        <thead class="bg-gray-50 dark:bg-slate-700"><tr>${headers.map(h => `<th class="p-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase">${h}</th>`).join('')}</tr></thead>
-                        <tbody>${tableRows}</tbody>
-                    </table>
-                </div>
-            </div>`;
-    };
-
-    const tablesHtml = `
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            ${createTable('buffer_facility_list_title', atFacilityContainers, 'add')}
-            ${createTable('buffer_buffer_list_title', inBufferContainers, 'remove')}
-        </div>
-    `;
-
-    dashboardGrid.innerHTML = statsHtml + tablesHtml;
-}
-
-function renderCharts(processedData: any[], filteredData: any[]) {
-    const viewKeyMap = { vessel: 'view_by_vessel', po: 'view_by_po', warehouse: 'view_by_warehouse' } as const;
-    barChartTitle.textContent = t(viewKeyMap[currentView as keyof typeof viewKeyMap]);
-
-    const updateChart = (chartId: string, type: any, data: any, options: any) => {
-        const ctx = (document.getElementById(chartId) as HTMLCanvasElement)?.getContext('2d');
-        if (!ctx) return;
-        if (charts[chartId]) charts[chartId].destroy();
-        charts[chartId] = new Chart(ctx, { type, data, options });
-    };
-
-    const safeProcessedData = Array.isArray(processedData) ? processedData : [];
-    const barData = {
-        labels: safeProcessedData.map(item => item.name),
-        datasets: [{ label: 'Total de Contêineres', data: safeProcessedData.map(item => item.totalFCL), backgroundColor: 'rgba(59, 130, 246, 0.7)' }]
-    };
-    updateChart('main-bar-chart', 'bar', barData, { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } } });
-    
-    const safeFilteredData = Array.isArray(filteredData) ? filteredData : [];
-    const statusCounts = safeFilteredData.reduce((acc, row) => {
-        const status = row['STATUS CNTR WAREHOUSE'] || 'Sem Status';
-        acc[status] = (acc[status] || 0) + 1;
-        return acc;
-    }, {} as Record<string, number>);
-    const pieData = {
-        labels: Object.keys(statusCounts),
-        datasets: [{ data: Object.values(statusCounts), backgroundColor: ['#ef4444', '#f97316', '#f59e0b', '#84cc16', '#22c55e', '#10b981', '#14b8a6', '#3b82f6', '#8b5cf6', '#a855f7'] }]
-    };
-    updateChart('status-pie-chart', 'pie', pieData, { responsive: true, plugins: { legend: { position: 'right' } } });
-
-    const deadlineGroups = safeFilteredData.reduce((acc, row) => {
-        if ((row['STATUS']||'').toLowerCase().includes('entregue')) return acc;
-        const deadline = excelDateToJSDate(row['DEADLINE RETURN CNTR']);
-        if (!deadline) return acc;
-        const days = Math.ceil((deadline.getTime() - TODAY.getTime()) / (1000 * 3600 * 24));
-        let group = '31+ dias';
-        if (days < 0) group = 'Atrasado';
-        else if (days <= 7) group = '0-7 dias';
-        else if (days <= 15) group = '8-15 dias';
-        else if (days <= 30) group = '16-30 dias';
-        acc[group] = (acc[group] || 0) + 1;
-        return acc;
-    }, {} as Record<string, number>);
-    const deadlineLabels = ['Atrasado', '0-7 dias', '8-15 dias', '16-30 dias', '31+ dias'];
-    const deadlineData = {
-        labels: deadlineLabels,
-        datasets: [{ label: 'Nº de Contêineres', data: deadlineLabels.map(l => deadlineGroups[l] || 0), backgroundColor: ['#dc2626', '#f97316', '#facc15', '#84cc16', '#22c55e'] }]
-    };
-    updateChart('deadline-distribution-chart', 'bar', deadlineData, { responsive: true, plugins: { legend: { display: false } } });
-}
-
-function populateFilters(data: any[]) {
-    const createOptions = (arr: string[]) => arr.map(item => `<option value="${item}">${item}</option>`).join('');
-    const unique = (key: string) => {
-        const seen = new Map<string, string>();
-        for (const row of data) {
-            const originalValue = String(row[key] || '').trim();
-            if (originalValue) {
-                const normalizedValue = originalValue.toUpperCase();
-                if (!seen.has(normalizedValue)) seen.set(normalizedValue, originalValue);
-            }
-        }
-        return [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-    };
-    poFilter.innerHTML = createOptions(unique('PO SAP'));
-    vesselFilter.innerHTML = createOptions(unique('ARRIVAL VESSEL'));
-    statusFilter.innerHTML = createOptions(unique('STATUS CNTR WAREHOUSE'));
-    finalStatusFilter.innerHTML = createOptions(unique('STATUS'));
-    cargoTypeFilter.innerHTML = createOptions(unique('TYPE OF CARGO'));
-    shipownerFilter.innerHTML = createOptions(unique('SHIPOWNER'));
-    loadingTypeFilter.innerHTML = createOptions(unique('LOADING TYPE'));
-}
-
-function showDashboard() {
-    filterContainer.classList.remove('hidden');
-    viewTabsContainer.classList.remove('hidden');
-    exportPdfBtn.classList.remove('hidden');
-    clearDataBtn.classList.remove('hidden');
-    totalFclDisplay.classList.remove('hidden');
-}
-
-function resetUI() {
-    dashboardGrid.innerHTML = '';
-    placeholder.classList.remove('hidden');
-    filterContainer.classList.add('hidden');
-    chartsContainer.classList.add('hidden');
-    summaryContainer.classList.add('hidden');
-    viewTabsContainer.classList.add('hidden');
-    exportPdfBtn.classList.add('hidden');
-    clearDataBtn.classList.add('hidden');
-    totalFclDisplay.classList.add('hidden');
-    planConfigContainer.classList.add('hidden');
-    bufferConfigContainer.classList.add('hidden');
-    originalData = [];
-    containersInBuffer.clear();
-    Object.values(charts).forEach(chart => chart.destroy());
-    charts = {};
-    lastUpdate.textContent = t('upload_prompt_initial');
-    setView('vessel');
-}
-
-function formatDate(dateString: any): string {
-    const date = excelDateToJSDate(dateString);
-    if (!date) return 'N/A';
-    return date.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
-}
-
-function handleSummaryCardClick(event: Event) {
-    const card = (event.target as HTMLElement).closest('.summary-card') as HTMLElement;
-    if (!card || currentView === 'plan' || currentView === 'buffer') return;
-    const risk = card.dataset.risk as RiskCategory;
-    activeRiskFilter = activeRiskFilter === risk ? null : risk;
-    updateSummaryCardStyles();
-    const chartRawDataToRender = activeRiskFilter ? filteredDataCache.filter(row => getContainerRisk(row) === activeRiskFilter) : filteredDataCache;
-    let gridDataToRender = processDataForView(filteredDataCache);
-    if (activeRiskFilter) {
-        gridDataToRender = gridDataToRender.map(group => {
-            const filteredContainers = group.containers.filter((c: any) => c.risk === activeRiskFilter);
-            return { ...group, containers: filteredContainers, totalFCL: filteredContainers.length };
-        }).filter(group => group.totalFCL > 0);
-    }
-    renderDashboard(gridDataToRender);
-    renderCharts(gridDataToRender, chartRawDataToRender);
-}
-
-function updateSummaryCardStyles() {
-    summaryContainer.querySelectorAll('.summary-card').forEach(card => {
-        const cardEl = card as HTMLElement;
-        if (cardEl.dataset.risk === activeRiskFilter) cardEl.classList.add('active-summary-card');
-        else cardEl.classList.remove('active-summary-card');
-    });
-}
-
+// --- Funções de Exportação e Modal (código original sem alterações) ---
 async function handlePdfExport() {
-    showLoading();
-    const reportContent = document.getElementById('report-content');
-    if (!reportContent) { hideLoading(); return; }
-    try {
-        const { jsPDF } = jspdf;
-        const canvas = await html2canvas(reportContent, { scale: 2, useCORS: true });
-        const imgData = canvas.toDataURL('image/png');
-        const pdf = new jsPDF({ orientation: 'landscape', unit: 'px', format: [canvas.width, canvas.height] });
-        pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
-        pdf.save(`dashboard_export_${currentView}_${new Date().toISOString().split('T')[0]}.pdf`);
-    } catch (error) {
-        console.error("Error generating PDF:", error);
-        showToast("Ocorreu um erro ao gerar o PDF.", "error");
-    } finally { hideLoading(); }
+    // ... (código original sem alterações) ...
+    showLoading();
+    const reportContent = document.getElementById('report-content');
+    if (!reportContent) { hideLoading(); return; }
+    try {
+        const { jsPDF } = jspdf;
+        const canvas = await html2canvas(reportContent, { scale: 2, useCORS: true });
+        const imgData = canvas.toDataURL('image/png');
+        const pdf = new jsPDF({ orientation: 'landscape', unit: 'px', format: [canvas.width, canvas.height] });
+        pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+        pdf.save(`dashboard_export_${currentView}_${new Date().toISOString().split('T')[0]}.pdf`);
+    } catch (error) {
+        console.error("Error generating PDF:", error);
+        showToast("Ocorreu um erro ao gerar o PDF.", "error");
+    } finally { hideLoading(); }
 }
 
 function handleDailyPlanExport(event: Event) {
-    const target = (event.target as HTMLElement).closest('.export-plan-btn') as HTMLElement;
-    if (!target) return;
-
-    const date = target.dataset.date;
-    const format = target.dataset.format;
-    const dailyData = date ? deliveryPlanCache[date] : [];
-
-    if (dailyData.length === 0) {
-        showToast('Nenhum dado para exportar.', 'warning');
-        return;
-    }
-
-    if (format === 'pdf') {
-        exportDailyPlanToPdf(dailyData, date!);
-    } else if (format === 'excel') {
-        exportDailyPlanToExcel(dailyData, date!);
-    }
+    // ... (código original sem alterações) ...
+    const target = (event.target as HTMLElement).closest('.export-plan-btn') as HTMLElement;
+    if (!target) return;
+    const date = target.dataset.date;
+    const format = target.dataset.format;
+    const dailyData = date ? deliveryPlanCache[date] : [];
+    if (dailyData.length === 0) {
+        showToast('Nenhum dado para exportar.', 'warning');
+        return;
+    }
+    if (format === 'pdf') {
+        exportDailyPlanToPdf(dailyData, date!);
+    } else if (format === 'excel') {
+        exportDailyPlanToExcel(dailyData, date!);
+    }
 }
 
 function exportDailyPlanToPdf(data: any[], date: string) {
-    const { jsPDF } = jspdf;
-    const doc = new jsPDF();
-    const formattedDate = new Date(date).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
-
-    const head = [['#', 'Contêiner', 'Prazo Retorno', 'Dias Restantes', 'Navio', 'PO SAP', 'Armazém']];
-    const body = data.map((c, i) => [
-        i + 1,
-        c['CNTRS ORIGINAL'] || '',
-        formatDate(c['DEADLINE RETURN CNTR']),
-        c.daysToDeadline ?? 'N/A',
-        c['ARRIVAL VESSEL'] || '',
-        c['PO SAP'] || '',
-        c['BONDED WAREHOUSE'] || '',
-    ]);
-
-    doc.text(`${t('plan_daily_schedule_for')} ${formattedDate}`, 14, 15);
-    (doc as any).autoTable({
-        head,
-        body,
-        startY: 20,
-        theme: 'grid',
-        headStyles: { fillColor: [22, 160, 133] },
-    });
-
-    doc.save(`plano_entrega_${date}.pdf`);
+    // ... (código original sem alterações) ...
+    const { jsPDF } = jspdf;
+    const doc = new jsPDF();
+    const formattedDate = new Date(date).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+    const head = [['#', 'Contêiner', 'Prazo Retorno', 'Dias Restantes', 'Navio', 'PO SAP', 'Armazém']];
+    const body = data.map((c, i) => [
+        i + 1,
+        c['CNTRS ORIGINAL'] || '',
+        formatDate(c['DEADLINE RETURN CNTR']),
+        c.daysToDeadline ?? 'N/A',
+        c['ARRIVAL VESSEL'] || '',
+        c['PO SAP'] || '',
+        c['BONDED WAREHOUSE'] || '',
+    ]);
+    doc.text(`${t('plan_daily_schedule_for')} ${formattedDate}`, 14, 15);
+    (doc as any).autoTable({
+        head,
+        body,
+        startY: 20,
+        theme: 'grid',
+        headStyles: { fillColor: [22, 160, 133] },
+    });
+    doc.save(`plano_entrega_${date}.pdf`);
 }
 
 function exportDailyPlanToExcel(data: any[], date: string) {
-    const dataForSheet = data.map((c, i) => ({
-        '#': i + 1,
-        'Contêiner': c['CNTRS ORIGINAL'] || '',
-        'Prazo Retorno': formatDate(c['DEADLINE RETURN CNTR']),
-        'Dias Restantes': c.daysToDeadline ?? 'N/A',
-        'Navio': c['ARRIVAL VESSEL'] || '',
-        'PO SAP': c['PO SAP'] || '',
-        'Armazém': c['BONDED WAREHOUSE'] || '',
-    }));
-    const worksheet = XLSX.utils.json_to_sheet(dataForSheet);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Plano de Entrega');
-    XLSX.writeFile(workbook, `plano_entrega_${date}.xlsx`);
+    // ... (código original sem alterações) ...
+    const dataForSheet = data.map((c, i) => ({
+        '#': i + 1,
+        'Contêiner': c['CNTRS ORIGINAL'] || '',
+        'Prazo Retorno': formatDate(c['DEADLINE RETURN CNTR']),
+        'Dias Restantes': c.daysToDeadline ?? 'N/A',
+        'Navio': c['ARRIVAL VESSEL'] || '',
+        'PO SAP': c['PO SAP'] || '',
+        'Armazém': c['BONDED WAREHOUSE'] || '',
+    }));
+    const worksheet = XLSX.utils.json_to_sheet(dataForSheet);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Plano de Entrega');
+    XLSX.writeFile(workbook, `plano_entrega_${date}.xlsx`);
 }
 
 function openModal(item: any) {
-    activeModalItem = item;
-    modalSortState = { column: 'daysToDeadline', direction: 'asc' };
-    renderModalContent();
-    detailsModal.classList.remove('hidden');
-    document.body.classList.add('overflow-hidden');
-    setTimeout(() => detailsModal.classList.add('modal-open'), 10);
+    // ... (código original sem alterações) ...
+    activeModalItem = item;
+    modalSortState = { column: 'daysToDeadline', direction: 'asc' };
+    renderModalContent();
+    detailsModal.classList.remove('hidden');
+    document.body.classList.add('overflow-hidden');
+    setTimeout(() => detailsModal.classList.add('modal-open'), 10);
 }
 
 function closeModal() {
-    detailsModal.classList.remove('modal-open');
-     setTimeout(() => {
-        detailsModal.classList.add('hidden');
-        document.body.classList.remove('overflow-hidden');
-        activeModalItem = null;
-    }, 300);
+    // ... (código original sem alterações) ...
+    detailsModal.classList.remove('modal-open');
+      setTimeout(() => {
+        detailsModal.classList.add('hidden');
+        document.body.classList.remove('overflow-hidden');
+        activeModalItem = null;
+    }, 300);
 }
 
 function handleModalSort(event: Event) {
-    const target = (event.target as HTMLElement).closest('th');
-    if (!target || !target.dataset.key) return;
-    const sortKey = target.dataset.key;
-    if (modalSortState.column === sortKey) {
-        modalSortState.direction = modalSortState.direction === 'asc' ? 'desc' : 'asc';
-    } else {
-        modalSortState.column = sortKey;
-        modalSortState.direction = 'asc';
-    }
-    renderModalContent();
+    // ... (código original sem alterações) ...
+    const target = (event.target as HTMLElement).closest('th');
+    if (!target || !target.dataset.key) return;
+    const sortKey = target.dataset.key;
+    if (modalSortState.column === sortKey) {
+        modalSortState.direction = modalSortState.direction === 'asc' ? 'desc' : 'asc';
+    } else {
+        modalSortState.column = sortKey;
+        modalSortState.direction = 'asc';
+    }
+    renderModalContent();
 }
 
 function renderModalContent() {
-    if (!activeModalItem) return;
+    // ... (código original sem alterações) ...
+    if (!activeModalItem) return;
+    const { name, totalFCL, containers } = activeModalItem;
+    modalHeaderContent.innerHTML = `<h2 class="text-2xl font-bold text-gray-800 dark:text-slate-100">${currentView === 'po' ? 'PO: ' : ''}${name}</h2><p class="text-gray-600 dark:text-slate-400">${totalFCL} ${t('containers_unit')}</p>`;
+    
+    const deliveryDateKey = Object.keys(containers[0] || {}).find(key => key.toUpperCase().includes('DELIVERY DATE')) || 'DELIVERY DATE AT BYD';
+    const headers = [
+        { label: '#', key: null }, { label: 'Contêiner', key: 'CNTRS ORIGINAL' },
+        { label: 'BL', key: 'BL' }, { label: 'PO SAP', key: 'PO SAP' },
+        { label: 'Navio', key: 'ARRIVAL VESSEL' }, { label: 'Armazém', key: 'BONDED WAREHOUSE' },
+        { label: 'Armador', key: 'SHIPOWNER' }, { label: 'Tipo Carga', key: 'LOADING TYPE' },
+        { label: 'Status Armazém', key: 'STATUS CNTR WAREHOUSE' }, { label: 'Data Entrega', key: deliveryDateKey, type: 'date' },
+        { label: 'Prazo Retorno', key: 'DEADLINE RETURN CNTR', type: 'date' }, { label: 'Dias Restantes', key: 'daysToDeadline', type: 'number' },
+        { label: 'Status Final', key: 'STATUS' },
+    ];
 
-    const { name, totalFCL, containers } = activeModalItem;
-    modalHeaderContent.innerHTML = `<h2 class="text-2xl font-bold text-gray-800 dark:text-slate-100">${currentView === 'po' ? 'PO: ' : ''}${name}</h2><p class="text-gray-600 dark:text-slate-400">${totalFCL} ${t('containers_unit')}</p>`;
-    
-    const deliveryDateKey = Object.keys(containers[0] || {}).find(key => key.toUpperCase().includes('DELIVERY DATE')) || 'DELIVERY DATE AT BYD';
-    const headers = [
-        { label: '#', key: null }, { label: 'Contêiner', key: 'CNTRS ORIGINAL' },
-        { label: 'BL', key: 'BL' }, { label: 'PO SAP', key: 'PO SAP' },
-        { label: 'Navio', key: 'ARRIVAL VESSEL' }, { label: 'Armazém', key: 'BONDED WAREHOUSE' },
-        { label: 'Armador', key: 'SHIPOWNER' }, { label: 'Tipo Carga', key: 'LOADING TYPE' },
-        { label: 'Status Armazém', key: 'STATUS CNTR WAREHOUSE' }, { label: 'Data Entrega', key: deliveryDateKey, type: 'date' },
-        { label: 'Prazo Retorno', key: 'DEADLINE RETURN CNTR', type: 'date' }, { label: 'Dias Restantes', key: 'daysToDeadline', type: 'number' },
-        { label: 'Status Final', key: 'STATUS' },
-    ];
+    const sortedContainers = [...containers];
+    const { column, direction } = modalSortState;
+    if (column) {
+        sortedContainers.sort((a, b) => {
+            const headerDef = headers.find(h => h.key === column);
+            let valA = a[column]; let valB = b[column];
+            if (headerDef?.type === 'date') {
+                valA = excelDateToJSDate(valA)?.getTime() ?? (direction === 'asc' ? Infinity : -Infinity);
+                valB = excelDateToJSDate(valB)?.getTime() ?? (direction === 'asc' ? Infinity : -Infinity);
+            }
+            if (valA === null || valA === undefined) return 1;
+            if (valB === null || valB === undefined) return -1;
+            if (valA < valB) return direction === 'asc' ? -1 : 1;
+            if (valA > valB) return direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+    }
 
-    const sortedContainers = [...containers];
-    const { column, direction } = modalSortState;
-    if (column) {
-        sortedContainers.sort((a, b) => {
-            const headerDef = headers.find(h => h.key === column);
-            let valA = a[column]; let valB = b[column];
-            if (headerDef?.type === 'date') {
-                valA = excelDateToJSDate(valA)?.getTime() ?? (direction === 'asc' ? Infinity : -Infinity);
-                valB = excelDateToJSDate(valB)?.getTime() ?? (direction === 'asc' ? Infinity : -Infinity);
-            }
-            if (valA === null || valA === undefined) return 1;
-            if (valB === null || valB === undefined) return -1;
-            if (valA < valB) return direction === 'asc' ? -1 : 1;
-            if (valA > valB) return direction === 'asc' ? 1 : -1;
-            return 0;
-        });
-    }
+    const headerHtml = headers.map(h => {
+        if (!h.key) return `<th class="px-2 py-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase">${h.label}</th>`;
+        const isSorted = modalSortState.column === h.key;
+        const sortIcon = isSorted ? (modalSortState.direction === 'asc' ? 'fa-sort-up' : 'fa-sort-down') : 'fa-sort';
+        return `<th class="px-2 py-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase sortable-header ${isSorted ? 'sorted' : ''}" data-key="${h.key}">${h.label} <i class="fas ${sortIcon} sort-icon"></i></th>`;
+    }).join('');
 
-    const headerHtml = headers.map(h => {
-        if (!h.key) return `<th class="px-2 py-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase">${h.label}</th>`;
-        const isSorted = modalSortState.column === h.key;
-        const sortIcon = isSorted ? (modalSortState.direction === 'asc' ? 'fa-sort-up' : 'fa-sort-down') : 'fa-sort';
-        return `<th class="px-2 py-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase sortable-header ${isSorted ? 'sorted' : ''}" data-key="${h.key}">${h.label} <i class="fas ${sortIcon} sort-icon"></i></th>`;
-    }).join('');
+    const tableRows = sortedContainers.map((c: any, i: number) => {
+        const daysText = c.risk === 'none' ? `<span class="font-semibold text-green-700">${t('modal_delivered_status')}</span>` : c.daysToDeadline !== null ? `<span class="font-bold ${c.daysToDeadline < 0 ? 'text-red-600' : ''}">${c.daysToDeadline}</span>` : 'N/A';
+        return `<tr class="row-risk-${c.risk}">
+            <td class="px-2 py-1.5 text-xs text-center">${i + 1}</td>
+            <td class="px-2 py-1.5 text-xs font-semibold">${c['CNTRS ORIGINAL'] || ''}</td>
+            <td class="px-2 py-1.5 text-xs">${c['BL'] || ''}</td>
+            <td class="px-2 py-1.5 text-xs">${c['PO SAP'] || ''}</td>
+            <td class="px-2 py-1.5 text-xs">${c['ARRIVAL VESSEL'] || ''}</td>
+            <td class="px-2 py-1.5 text-xs">${c['BONDED WAREHOUSE'] || ''}</td>
+            <td class="px-2 py-1.5 text-xs">${c['SHIPOWNER'] || ''}</td>
+            <td class="px-2 py-1.5 text-xs">${c['LOADING TYPE'] || ''}</td>
+            <td class="px-2 py-1.5 text-xs">${c['STATUS CNTR WAREHOUSE'] || ''}</td>
+            <td class="px-2 py-1.5 text-xs">${formatDate(c[deliveryDateKey])}</td>
+            <td class="px-2 py-1.5 text-xs">${formatDate(c['DEADLINE RETURN CNTR'])}</td>
+            <td class="px-2 py-1.5 text-xs text-center">${daysText}</td>
+            <td class="px-2 py-1.5 text-xs">${c['STATUS'] || ''}</td>
+        </tr>`;
+    }).join('');
 
-    const tableRows = sortedContainers.map((c: any, i: number) => {
-        const daysText = c.risk === 'none' ? `<span class="font-semibold text-green-700">${t('modal_delivered_status')}</span>` : c.daysToDeadline !== null ? `<span class="font-bold ${c.daysToDeadline < 0 ? 'text-red-600' : ''}">${c.daysToDeadline}</span>` : 'N/A';
-        return `<tr class="row-risk-${c.risk}">
-            <td class="px-2 py-1.5 text-xs text-center">${i + 1}</td>
-            <td class="px-2 py-1.5 text-xs font-semibold">${c['CNTRS ORIGINAL'] || ''}</td>
-            <td class="px-2 py-1.5 text-xs">${c['BL'] || ''}</td>
-            <td class="px-2 py-1.5 text-xs">${c['PO SAP'] || ''}</td>
-            <td class="px-2 py-1.5 text-xs">${c['ARRIVAL VESSEL'] || ''}</td>
-            <td class="px-2 py-1.5 text-xs">${c['BONDED WAREHOUSE'] || ''}</td>
-            <td class="px-2 py-1.5 text-xs">${c['SHIPOWNER'] || ''}</td>
-            <td class="px-2 py-1.5 text-xs">${c['LOADING TYPE'] || ''}</td>
-            <td class="px-2 py-1.5 text-xs">${c['STATUS CNTR WAREHOUSE'] || ''}</td>
-            <td class="px-2 py-1.5 text-xs">${formatDate(c[deliveryDateKey])}</td>
-            <td class="px-2 py-1.5 text-xs">${formatDate(c['DEADLINE RETURN CNTR'])}</td>
-            <td class="px-2 py-1.5 text-xs text-center">${daysText}</td>
-            <td class="px-2 py-1.5 text-xs">${c['STATUS'] || ''}</td>
-        </tr>`;
-    }).join('');
-
-    modalBody.innerHTML = `<div class="table-responsive"><table class="min-w-full text-sm">
-        <thead class="bg-gray-100 dark:bg-slate-700"><tr class="border-b dark:border-slate-600">${headerHtml}</tr></thead>
-        <tbody class="divide-y divide-gray-200 dark:divide-slate-700">${tableRows}</tbody>
-    </table></div>`;
-    modalBody.querySelector('thead')?.addEventListener('click', handleModalSort);
+    modalBody.innerHTML = `<div class="table-responsive"><table class="min-w-full text-sm">
+        <thead class="bg-gray-100 dark:bg-slate-700"><tr class="border-b dark:border-slate-600">${headerHtml}</tr></thead>
+        <tbody class="divide-y divide-gray-200 dark:divide-slate-700">${tableRows}</tbody>
+    </table></div>`;
+    modalBody.querySelector('thead')?.addEventListener('click', handleModalSort);
 }
