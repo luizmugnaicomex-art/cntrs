@@ -4,14 +4,12 @@ declare const Chart: any;
 declare const ChartDataLabels: any;
 declare const jspdf: { jsPDF: any };
 declare const html2canvas: any;
-// ADICIONADO: Declaração para o TypeScript reconhecer o Firebase
 declare const firebase: any;
 
 // ======================================================
 // ==== BLOCO DE INICIALIZAÇÃO E FUNÇÕES DO FIREBASE ====
 // ======================================================
 
-// 1. Configuração do Firebase com as variáveis de ambiente
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
@@ -21,71 +19,121 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
-// 2. Inicializa o Firebase e o Firestore Database
 if (!firebase.apps.length) {
   firebase.initializeApp(firebaseConfig);
 }
 const db = firebase.firestore();
+const COLECAO_CONTAINERES = "painel-containeres"; // Nome da nossa coleção
 
-// 3. Função para salvar os dados no Firestore (substitui o saveDataToStorage)
-//    Esta função será chamada sempre que houver uma alteração local (upload, mudança no buffer).
-const sincronizarComFirestore = () => {
-  const stateToSave = {
-    data: originalData,
-    containersInBuffer: Array.from(containersInBuffer),
-    timestamp: new Date().toISOString()
-  };
-  
-  // Usamos um documento fixo para guardar o estado completo do dashboard
-  db.collection("painel-containeres").doc("estado-atual").set(stateToSave)
-    .then(() => {
-      console.log("Dashboard sincronizado com o Firestore!");
-    })
-    .catch((error: any) => {
-      console.error("Erro ao sincronizar com o Firestore: ", error);
-      showToast("Erro ao salvar dados na nuvem.", "error");
-    });
-};
+// --- FUNÇÕES DO FIREBASE ---
 
-// 4. Função para escutar mudanças no Firestore (substitui o loadDataFromStorage)
-//    Esta função é a "mágica" do tempo real. Ela atualiza a tela quando os dados mudam no servidor.
+/**
+ * Apaga todos os documentos de uma coleção. Usado antes de um novo upload.
+ */
+async function limparColecao() {
+  const querySnapshot = await db.collection(COLECAO_CONTAINERES).get();
+  const batch = db.batch();
+  querySnapshot.docs.forEach(doc => {
+    batch.delete(doc.ref);
+  });
+  await batch.commit();
+  console.log("Coleção antiga limpa.");
+}
+
+/**
+ * Salva uma lista de contêineres no Firestore. Cada contêiner vira um documento.
+ * IDs com "/" são corrigidos e IDs vazios recebem um ID automático.
+ * @param {any[]} containers - A lista de contêineres para salvar.
+ */
+async function sincronizarComFirestore(containers: any[]) {
+    showLoading();
+    showToast("Iniciando sincronização com a nuvem...", "warning");
+    try {
+        // 1. Limpa os dados antigos para garantir que só os novos existam.
+        await limparColecao();
+        
+        // 2. Salva os novos dados em lotes (batches) para máxima eficiência.
+        const batchArray = [];
+        let currentBatch = db.batch();
+        let operationCount = 0;
+
+        for (const container of containers) {
+            const containerIdOriginal = String(container['CNTRS ORIGINAL'] || '').trim();
+            let docRef;
+
+            if (containerIdOriginal && containerIdOriginal.length > 0) {
+                // Se temos um ID, nós o "sanitizamos", trocando / por -
+                const sanitizedId = containerIdOriginal.replace(/\//g, '-');
+                docRef = db.collection(COLECAO_CONTAINERES).doc(sanitizedId);
+            } else {
+                // Se o ID está vazio, deixamos o Firestore gerar um ID único e seguro
+                docRef = db.collection(COLECAO_CONTAINERES).doc();
+            }
+            
+            currentBatch.set(docRef, container);
+            operationCount++;
+
+            // O Firestore limita lotes a 500 operações. Criamos um novo lote quando atingimos o limite.
+            if (operationCount === 499) {
+                batchArray.push(currentBatch);
+                currentBatch = db.batch();
+                operationCount = 0;
+            }
+        }
+        if (operationCount > 0) {
+            batchArray.push(currentBatch);
+        }
+
+        // 3. Envia todos os lotes para o Firestore.
+        await Promise.all(batchArray.map(batch => batch.commit()));
+        
+        console.log(`${containers.length} contêineres sincronizados com sucesso!`);
+        showToast("Sincronização concluída com sucesso!", "success");
+
+    } catch (error) {
+        console.error("Erro ao sincronizar com Firestore: ", error);
+        showToast("Ocorreu um erro grave ao salvar os dados.", "error");
+    } finally {
+        hideLoading();
+    }
+}
+
+/**
+ * Escuta por mudanças na coleção de contêineres e atualiza a UI.
+ */
 const escutarMudancasEmTempoReal = () => {
-  db.collection("painel-containeres").doc("estado-atual").onSnapshot(
-    (doc: any) => {
-      if (doc.exists) {
-        const estadoDaNuvem = doc.data();
-        console.log("Dados recebidos do Firestore em tempo real.");
+  db.collection(COLECAO_CONTAINERES).onSnapshot(
+    (querySnapshot: any) => {
+        const dadosDaNuvem: any[] = [];
+        querySnapshot.forEach((doc: any) => {
+            dadosDaNuvem.push(doc.data());
+        });
         
-        // Atualiza o estado global da aplicação com os dados da nuvem
-        originalData = estadoDaNuvem.data || [];
-        containersInBuffer = new Set(estadoDaNuvem.containersInBuffer || []);
+        console.log(`${dadosDaNuvem.length} contêineres recebidos do Firestore.`);
         
-        // Renderiza a UI com os novos dados
-        populateFilters(originalData);
-        applyFiltersAndRender();
-        showDashboard();
+        originalData = dadosDaNuvem;
         
-        const loadedDate = new Date(estadoDaNuvem.timestamp);
-        lastUpdate.textContent = `${t('upload_prompt_updated')} ${loadedDate.toLocaleString('pt-BR')}`;
-        showToast("Dashboard atualizado em tempo real!", "success");
-
-      } else {
-        console.log("Nenhum dado no Firestore. Aguardando primeiro upload.");
-        // Se não há dados, a UI já está no estado inicial, então não fazemos nada.
-      }
+        if (originalData.length > 0) {
+            populateFilters(originalData);
+            applyFiltersAndRender();
+            showDashboard();
+            lastUpdate.textContent = `${t('upload_prompt_updated')} ${new Date().toLocaleString('pt-BR')}`;
+            showToast("Dashboard atualizado!", "success");
+        } else {
+            resetUI();
+        }
     },
     (error: any) => {
-      console.error("Erro de conexão com o Firestore: ", error);
-      showToast("Erro de conexão com o servidor de dados.", "error");
+        console.error("Erro de conexão com o Firestore: ", error);
+        showToast("Erro de conexão com o servidor de dados.", "error");
     }
   );
 };
 
 
-// --- DOM Elements (código original sem alterações) ---
+// --- DOM Elements ---
 const fileUpload = document.getElementById('file-upload') as HTMLInputElement;
 const dashboardGrid = document.getElementById('dashboard-grid') as HTMLElement;
-// ... (todo o restante dos seus seletores de DOM permanece igual) ...
 const lastUpdate = document.getElementById('last-update') as HTMLElement;
 const placeholder = document.getElementById('placeholder') as HTMLElement;
 const filterContainer = document.getElementById('filter-container') as HTMLElement;
@@ -127,7 +175,8 @@ const mediumRiskCount = document.getElementById('medium-risk-count') as HTMLElem
 const lowRiskCount = document.getElementById('low-risk-count') as HTMLElement;
 const noneRiskCount = document.getElementById('none-risk-count') as HTMLElement;
 
-// --- Global State (código original sem alterações) ---
+
+// --- Global State ---
 type RiskCategory = 'high' | 'medium' | 'low' | 'none';
 type View = 'vessel' | 'po' | 'warehouse' | 'plan' | 'buffer';
 let originalData: any[] = [];
@@ -141,13 +190,12 @@ let activeRiskFilter: RiskCategory | null = null;
 let currentLanguage: 'pt' | 'zh' = 'pt';
 let deliveryPlanCache: { [date: string]: any[] } = {};
 let containersInBuffer: Set<string> = new Set();
-// AVISO: As chaves de storage local não serão mais a fonte principal de dados.
-const STORAGE_KEY = 'containerDashboardData_backup'; // Renomeado para evitar conflito
 const THEME_STORAGE_KEY = 'containerDashboardTheme';
 
-// --- Translation Dictionary (código original sem alterações) ---
+
+// --- Translation Dictionary ---
 const translations = {
-    pt: { /* ... seu objeto de traduções em português ... */ 
+    pt: {
         main_title: "DASHBOARD DE CONTROLE DE CONTÊINERES",
         upload_prompt_initial: "Carregue um arquivo .xlsx para começar",
         upload_prompt_success: "Dados de",
@@ -205,7 +253,7 @@ const translations = {
         buffer_is_full: "O buffer está cheio. Não é possível adicionar mais contêineres.",
         buffer_filter_container: "Filtrar Contêiner",
     },
-    zh: { /* ... seu objeto de traduções em chinês ... */ 
+    zh: {
         main_title: "集装箱控制仪表板",
         upload_prompt_initial: "上传一个 .xlsx 文件开始",
         upload_prompt_success: "数据来自",
@@ -277,6 +325,7 @@ const t = (key: keyof typeof translations.pt, el?: HTMLElement) => {
     return text;
 };
 
+
 // --- Main App Initialization ---
 window.addEventListener('load', initializeApp);
 
@@ -286,10 +335,9 @@ function initializeApp() {
     }
     Chart.register(ChartDataLabels);
 
-    // Event Listeners (código original sem alterações)
+    // Event Listeners
     fileUpload.addEventListener('change', handleFileUpload);
     applyFiltersBtn.addEventListener('click', applyFiltersAndRender);
-    // ... (todos os seus outros event listeners permanecem iguais) ...
     resetFiltersBtn.addEventListener('click', resetFiltersAndRender);
     vesselSearchInput.addEventListener('input', filterVesselOptions);
     shipownerSearchInput.addEventListener('input', filterShipownerOptions);
@@ -302,17 +350,15 @@ function initializeApp() {
         }
     });
     exportPdfBtn.addEventListener('click', handlePdfExport);
-    clearDataBtn.addEventListener('click', () => {
-        // MODIFICADO: Esta ação agora limpa os dados na nuvem para todos.
-        if(confirm("Você tem certeza que deseja limpar os dados para TODOS os usuários? Esta ação não pode ser desfeita.")) {
-            // Para limpar, salvamos um estado vazio.
-            originalData = [];
-            containersInBuffer.clear();
-            sincronizarComFirestore();
-            resetUI(); // Reseta a UI local imediatamente
-            showToast("Dados na nuvem foram limpos.", "success");
+    
+    clearDataBtn.addEventListener('click', async () => {
+        if(confirm("Você tem certeza que quer limpar TODOS os dados da nuvem? Esta ação é irreversível.")) {
+            showLoading();
+            await limparColecao();
+            hideLoading();
         }
     });
+
     summaryContainer.addEventListener('click', handleSummaryCardClick);
     translateBtn.addEventListener('click', toggleLanguage);
     themeToggleBtn.addEventListener('click', toggleTheme);
@@ -339,25 +385,86 @@ function initializeApp() {
             renderBufferControlView(filteredDataCache);
         }
     });
+
+    // Modal Listeners
     modalCloseBtn.addEventListener('click', closeModal);
     detailsModal.addEventListener('click', (e) => { if (e.target === detailsModal) closeModal(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !detailsModal.classList.contains('hidden')) closeModal(); });
 
     initializeTheme();
     
-    // MODIFICADO: Em vez de carregar do storage local, iniciamos o listener do Firebase.
     escutarMudancasEmTempoReal();
 }
 
-// --- Funções de UI e Lógica (a maioria permanece igual) ---
 
+// --- File Handling ---
+function handleFileUpload(event: Event) {
+    const target = event.target as HTMLInputElement;
+    const file = target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+        try {
+            const workbook = XLSX.read(new Uint8Array(e.target!.result as ArrayBuffer), { type: 'array' });
+            const sheetName = workbook.SheetNames[0];
+            const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: false, defval: '' });
+            
+            const processedData = rawData.map((row: any) => {
+                const normalizedRow: { [key: string]: any } = {};
+                for (const key in row) {
+                    if (Object.prototype.hasOwnProperty.call(row, key)) {
+                        const normalizedKey = key.trim().toUpperCase().replace(/\s\s+/g, ' ');
+                        normalizedRow[normalizedKey] = row[key];
+                    }
+                }
+                return normalizedRow;
+            });
+
+            await sincronizarComFirestore(processedData);
+
+        } catch (err: any) {
+            showToast(err.message || 'Erro ao processar arquivo.', 'error');
+        } finally {
+            fileUpload.value = '';
+        }
+    };
+    reader.onerror = () => { showToast('Não foi possível ler o arquivo.', 'error'); };
+    reader.readAsArrayBuffer(file);
+}
+
+// --- Buffer Action ---
+function handleBufferAction(event: Event) {
+    const button = (event.target as HTMLElement).closest('.buffer-action-btn') as HTMLElement;
+    if (!button) return;
+
+    const id = button.dataset.id;
+    const action = button.dataset.action;
+    if (!id || !action) return;
+    
+    if (action === 'add') {
+        const capacity = parseInt(bufferCapacityInput.value, 10) || 400;
+        if (containersInBuffer.size >= capacity) {
+            showToast(t('buffer_is_full'), 'warning');
+            return;
+        }
+        containersInBuffer.add(id);
+    } else if (action === 'remove') {
+        containersInBuffer.delete(id);
+    }
+
+    renderBufferControlView(filteredDataCache);
+}
+
+
+// --- O RESTANTE DO CÓDIGO ---
 function showLoading() { loadingOverlay.classList.remove('hidden'); }
 function hideLoading() { loadingOverlay.classList.add('hidden'); }
 
 function showToast(message: string, type: 'success' | 'error' | 'warning' = 'success') {
-    // ... (código original sem alterações) ...
     const toastContainer = document.getElementById('toast-container');
     if (!toastContainer) return;
+
     const toast = document.createElement('div');
     const icons = { success: 'fa-check-circle', error: 'fa-times-circle', warning: 'fa-exclamation-triangle' };
     const colors = { success: 'bg-green-500', error: 'bg-red-500', warning: 'bg-yellow-500' };
@@ -368,7 +475,6 @@ function showToast(message: string, type: 'success' | 'error' | 'warning' = 'suc
 }
 
 function initializeTheme() {
-    // ... (código original sem alterações) ...
     const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) as 'light' | 'dark' | null;
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     const theme = savedTheme || (prefersDark ? 'dark' : 'light');
@@ -376,7 +482,6 @@ function initializeTheme() {
 }
 
 function toggleTheme() {
-    // ... (código original sem alterações) ...
     const isDark = document.documentElement.classList.contains('dark');
     const newTheme = isDark ? 'light' : 'dark';
     localStorage.setItem(THEME_STORAGE_KEY, newTheme);
@@ -384,7 +489,6 @@ function toggleTheme() {
 }
 
 function applyTheme(theme: 'light' | 'dark') {
-    // ... (código original sem alterações) ...
     const themeToggleIcon = document.getElementById('theme-toggle-icon') as HTMLElement;
     if (theme === 'dark') {
         document.documentElement.classList.add('dark');
@@ -395,23 +499,24 @@ function applyTheme(theme: 'light' | 'dark') {
         themeToggleIcon.classList.remove('fa-sun');
         themeToggleIcon.classList.add('fa-moon');
     }
+
     const isDarkMode = theme === 'dark';
     Chart.defaults.color = isDarkMode ? '#cbd5e1' : '#64748b';
     Chart.defaults.borderColor = isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
+
     if (originalData.length > 0) {
         applyFiltersAndRender();
     }
 }
 
+
 function toggleLanguage() {
-    // ... (código original sem alterações) ...
     currentLanguage = currentLanguage === 'pt' ? 'zh' : 'pt';
     translateBtnText.textContent = currentLanguage === 'pt' ? '中文' : 'Português';
     translateUI();
 }
 
 function translateUI() {
-    // ... (código original sem alterações) ...
     document.querySelectorAll('[data-translate-key]').forEach(el => {
         const key = el.getAttribute('data-translate-key') as keyof typeof translations.pt;
         if (key) {
@@ -426,68 +531,8 @@ function translateUI() {
     }
 }
 
-// --- Data Persistence (Funções Antigas Removidas/Substituídas) ---
-// A função loadDataFromStorage foi substituída por escutarMudancasEmTempoReal.
-// A função saveDataToStorage foi substituída por sincronizarComFirestore.
-
-// --- File Handling ---
-function handleFileUpload(event: Event) {
-    const target = event.target as HTMLInputElement;
-    const file = target.files?.[0];
-    const uploadLabel = document.querySelector('label[for="file-upload"] span');
-    if (!file || !uploadLabel) return;
-
-    const parentLabel = uploadLabel.parentElement as HTMLElement;
-    parentLabel.classList.add('opacity-50', 'cursor-not-allowed');
-    uploadLabel.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> ${t('loading_text')}`;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        try {
-            const workbook = XLSX.read(new Uint8Array(e.target!.result as ArrayBuffer), { type: 'array' });
-            const sheetName = workbook.SheetNames.find((name: string) => name.toUpperCase().includes('PLANILHA1'));
-            if (!sheetName || !workbook.Sheets[sheetName]) throw new Error(`Nenhuma planilha válida (ex: "Planilha1") foi encontrada.`);
-            
-            const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: false, defval: '' });
-            if (!Array.isArray(rawData)) throw new Error("O formato dos dados da planilha é inválido.");
-            if (rawData.length === 0) throw new Error("A planilha está vazia.");
-
-            originalData = rawData.map((row: any) => {
-                const normalizedRow: { [key: string]: any } = {};
-                for (const key in row) {
-                    if (Object.prototype.hasOwnProperty.call(row, key)) {
-                        const normalizedKey = key.trim().toUpperCase().replace(/\s\s+/g, ' ');
-                        normalizedRow[normalizedKey] = row[key];
-                    }
-                }
-                return normalizedRow;
-            });
-            
-            containersInBuffer.clear(); // Reseta o buffer ao carregar novo arquivo
-
-            // MODIFICADO: Em vez de salvar localmente, sincroniza com o Firestore.
-            // A UI será atualizada automaticamente pelo "escutador" (listener).
-            sincronizarComFirestore();
-            
-            showToast('Arquivo enviado. Sincronizando com todos os usuários...', 'success');
-        } catch (err: any) {
-            showToast(err.message || 'Erro ao processar arquivo.', 'error');
-            resetUI();
-        } finally {
-            parentLabel.classList.remove('opacity-50', 'cursor-not-allowed');
-            uploadLabel.innerHTML = t('upload_btn');
-            fileUpload.value = '';
-        }
-    };
-    reader.onerror = () => { showToast('Não foi possível ler o arquivo.', 'error'); resetUI(); };
-    reader.readAsArrayBuffer(file);
-}
-
-// --- O RESTANTE DO CÓDIGO (Data Processing, UI Rendering, Exports, Modal) ---
-// --- A maioria dessas funções não precisa de alteração, exceto onde salvam o estado. ---
 
 function excelDateToJSDate(serial: any): Date | null {
-    // ... (código original sem alterações) ...
     if (serial === null || serial === undefined || serial === '') return null;
     if (typeof serial === 'string') {
         if (/^\d{5}$/.test(serial)) { serial = parseInt(serial, 10); }
@@ -510,7 +555,6 @@ function excelDateToJSDate(serial: any): Date | null {
 }
 
 function getContainerRisk(container: any): RiskCategory {
-    // ... (código original sem alterações) ...
     const isDelivered = (container['STATUS'] || '').toLowerCase().includes('entregue');
     if (isDelivered) return 'none';
     const deadline = excelDateToJSDate(container['DEADLINE RETURN CNTR']);
@@ -525,7 +569,6 @@ function getContainerRisk(container: any): RiskCategory {
 function getSelectedOptions(select: HTMLSelectElement) { return Array.from(select.selectedOptions).map(opt => opt.value); }
 
 function filterVesselOptions() {
-    // ... (código original sem alterações) ...
     const searchTerm = vesselSearchInput.value.toUpperCase();
     const options = vesselFilter.options;
     for (let i = 0; i < options.length; i++) {
@@ -536,7 +579,6 @@ function filterVesselOptions() {
 }
 
 function filterShipownerOptions() {
-    // ... (código original sem alterações) ...
     const searchTerm = shipownerSearchInput.value.toUpperCase();
     const options = shipownerFilter.options;
     for (let i = 0; i < options.length; i++) {
@@ -547,10 +589,10 @@ function filterShipownerOptions() {
 }
 
 function applyFiltersAndRender() {
-    // ... (código original sem alterações, pois ele lê do estado global `originalData`) ...
     showLoading();
     activeRiskFilter = null; 
     updateSummaryCardStyles();
+
     setTimeout(() => {
         const selectedPOs = getSelectedOptions(poFilter).map(v => v.toUpperCase());
         const selectedVessels = getSelectedOptions(vesselFilter).map(v => v.toUpperCase());
@@ -559,6 +601,7 @@ function applyFiltersAndRender() {
         const selectedCargoTypes = getSelectedOptions(cargoTypeFilter).map(v => v.toUpperCase());
         const selectedShipowners = getSelectedOptions(shipownerFilter).map(v => v.toUpperCase());
         const selectedLoadingTypes = getSelectedOptions(loadingTypeFilter).map(v => v.toUpperCase());
+
         filteredDataCache = originalData.filter(row => 
             (selectedPOs.length === 0 || selectedPOs.includes(String(row['PO SAP'] || '').toUpperCase())) &&
             (selectedVessels.length === 0 || selectedVessels.includes(String(row['ARRIVAL VESSEL'] || '').toUpperCase())) &&
@@ -568,14 +611,15 @@ function applyFiltersAndRender() {
             (selectedShipowners.length === 0 || selectedShipowners.includes(String(row['SHIPOWNER'] || '').toUpperCase())) &&
             (selectedLoadingTypes.length === 0 || selectedLoadingTypes.includes(String(row['LOADING TYPE'] || '').toUpperCase()))
         );
+        
         setViewUI(currentView);
+        
         totalFclCount.textContent = filteredDataCache.length.toString();
         hideLoading();
     }, 50);
 }
 
 function resetFiltersAndRender() {
-    // ... (código original sem alterações) ...
     showLoading();
     setTimeout(() => {
         [poFilter, vesselFilter, statusFilter, finalStatusFilter, cargoTypeFilter, shipownerFilter, loadingTypeFilter].forEach(sel => sel.selectedIndex = -1);
@@ -589,16 +633,17 @@ function resetFiltersAndRender() {
 }
 
 function processDataForView(data: any[]) {
-    // ... (código original sem alterações) ...
     const groupByKeyMap = { vessel: 'ARRIVAL VESSEL', po: 'PO SAP', warehouse: 'BONDED WAREHOUSE' };
     const groupByKey = groupByKeyMap[currentView as 'vessel' | 'po' | 'warehouse'];
     const defaultName = `Sem ${groupByKey}`.toUpperCase();
+    
     const grouped = data.reduce((acc, row) => {
         const name = (row[groupByKey] ? String(row[groupByKey]).trim().toUpperCase() : defaultName) || defaultName;
         if (!acc[name]) acc[name] = [];
         acc[name].push(row);
         return acc;
     }, {} as Record<string, any[]>);
+
     return Object.entries(grouped).map(([name, containers]) => {
         const processed = containers.map(c => {
             const risk = getContainerRisk(c);
@@ -621,7 +666,6 @@ function processDataForView(data: any[]) {
 }
 
 function setView(view: View) {
-    // ... (código original sem alterações) ...
     if (currentView === view) return;
     if (currentView === 'buffer') {
         bufferSearchInput.value = '';
@@ -633,12 +677,12 @@ function setView(view: View) {
 }
 
 function setViewUI(view: View) {
-    // ... (código original sem alterações) ...
     planConfigContainer.classList.add('hidden');
     bufferConfigContainer.classList.add('hidden');
     chartsContainer.classList.add('hidden');
     summaryContainer.classList.add('hidden');
     exportPdfBtn.classList.add('hidden');
+    
     if (view === 'plan') {
         planConfigContainer.classList.remove('hidden');
         renderDeliveryPlanView(filteredDataCache);
@@ -657,7 +701,6 @@ function setViewUI(view: View) {
 }
 
 function renderSummary(filteredData: any[]) {
-    // ... (código original sem alterações) ...
     const summaryCounts: Record<RiskCategory, number> = { high: 0, medium: 0, low: 0, none: 0 };
     for (const row of filteredData) {
         summaryCounts[getContainerRisk(row)]++;
@@ -669,7 +712,6 @@ function renderSummary(filteredData: any[]) {
 }
 
 function renderDashboard(dataToRender: any[]) {
-    // ... (código original sem alterações) ...
     dashboardGrid.innerHTML = '';
     dashboardGrid.className = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6';
     if (!Array.isArray(dataToRender) || dataToRender.length === 0) {
@@ -685,7 +727,6 @@ function renderDashboard(dataToRender: any[]) {
 }
 
 function createDashboardCard(item: any) {
-    // ... (código original sem alterações) ...
     const card = document.createElement('div');
     card.className = `card risk-${item.overallRisk} bg-white dark:bg-slate-800`;
     card.innerHTML = `
@@ -697,7 +738,6 @@ function createDashboardCard(item: any) {
 }
 
 function renderDeliveryPlanView(data: any[]) {
-    // ... (código original sem alterações) ...
     dashboardGrid.innerHTML = '';
     dashboardGrid.className = 'grid grid-cols-1 gap-6';
 
@@ -726,6 +766,7 @@ function renderDeliveryPlanView(data: any[]) {
     for (const container of containersToSchedule) {
         let scheduled = false;
         while(!scheduled) {
+            // Skip weekends
             while (scheduleDate.getDay() === 0 || scheduleDate.getDay() === 6) {
                 scheduleDate.setDate(scheduleDate.getDate() + 1);
             }
@@ -745,7 +786,6 @@ function renderDeliveryPlanView(data: any[]) {
     let planHtml = '';
     const headers = ['#', 'Contêiner', 'Prazo Retorno', 'Dias Restantes', 'Navio', 'PO SAP', 'Armazém'];
     const tableHeader = headers.map(h => `<th class="px-2 py-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase">${h}</th>`).join('');
-    
     for (const [date, daySchedule] of Object.entries(deliveryPlanCache).sort((a, b) => a[0].localeCompare(b[0]))) {
 
         const formattedDate = new Date(date).toLocaleDateString('pt-BR', { timeZone: 'UTC', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -791,7 +831,6 @@ function renderDeliveryPlanView(data: any[]) {
 }
 
 function renderBufferControlView(data: any[]) {
-    // ... (código original sem alterações) ...
     dashboardGrid.innerHTML = '';
     dashboardGrid.className = 'grid grid-cols-1 gap-6';
 
@@ -833,7 +872,7 @@ function renderBufferControlView(data: any[]) {
     const createTable = (titleKey: keyof typeof translations.pt, containers: any[], action: 'add' | 'remove') => {
         const headers = ['Contêiner', 'Navio', 'PO SAP', 'Ação'];
         const buttonText = action === 'add' ? t('buffer_move_to') : t('buffer_remove_from');
-        const buttonClass = action === 'add' ? 'bg-blue-500 hover:bg-blue-600' : 'bg-red-500 hover:bg-red-600';
+        const buttonClass = action === 'add' ? 'bg-blue-500 hover:bg-blue-600' : 'bg-red-500 hover:bg-red-500';
 
         const tableRows = containers.map(c => `
             <tr class="border-b dark:border-slate-700">
@@ -871,7 +910,6 @@ function renderBufferControlView(data: any[]) {
 }
 
 function renderCharts(processedData: any[], filteredData: any[]) {
-    // ... (código original sem alterações) ...
     const viewKeyMap = { vessel: 'view_by_vessel', po: 'view_by_po', warehouse: 'view_by_warehouse' } as const;
     barChartTitle.textContent = t(viewKeyMap[currentView as keyof typeof viewKeyMap]);
 
@@ -923,7 +961,6 @@ function renderCharts(processedData: any[], filteredData: any[]) {
 }
 
 function populateFilters(data: any[]) {
-    // ... (código original sem alterações) ...
     const createOptions = (arr: string[]) => arr.map(item => `<option value="${item}">${item}</option>`).join('');
     const unique = (key: string) => {
         const seen = new Map<string, string>();
@@ -946,7 +983,6 @@ function populateFilters(data: any[]) {
 }
 
 function showDashboard() {
-    // ... (código original sem alterações) ...
     filterContainer.classList.remove('hidden');
     viewTabsContainer.classList.remove('hidden');
     exportPdfBtn.classList.remove('hidden');
@@ -955,7 +991,6 @@ function showDashboard() {
 }
 
 function resetUI() {
-    // ... (código original sem alterações) ...
     dashboardGrid.innerHTML = '';
     placeholder.classList.remove('hidden');
     filterContainer.classList.add('hidden');
@@ -976,14 +1011,12 @@ function resetUI() {
 }
 
 function formatDate(dateString: any): string {
-    // ... (código original sem alterações) ...
     const date = excelDateToJSDate(dateString);
     if (!date) return 'N/A';
     return date.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
 }
 
 function handleSummaryCardClick(event: Event) {
-    // ... (código original sem alterações) ...
     const card = (event.target as HTMLElement).closest('.summary-card') as HTMLElement;
     if (!card || currentView === 'plan' || currentView === 'buffer') return;
     const risk = card.dataset.risk as RiskCategory;
@@ -1002,7 +1035,6 @@ function handleSummaryCardClick(event: Event) {
 }
 
 function updateSummaryCardStyles() {
-    // ... (código original sem alterações) ...
     summaryContainer.querySelectorAll('.summary-card').forEach(card => {
         const cardEl = card as HTMLElement;
         if (cardEl.dataset.risk === activeRiskFilter) cardEl.classList.add('active-summary-card');
@@ -1010,32 +1042,7 @@ function updateSummaryCardStyles() {
     });
 }
 
-function handleBufferAction(event: Event) {
-    const button = (event.target as HTMLElement).closest('.buffer-action-btn') as HTMLElement;
-    if (!button) return;
-
-    const id = button.dataset.id;
-    const action = button.dataset.action;
-    if (!id || !action) return;
-    
-    if (action === 'add') {
-        const capacity = parseInt(bufferCapacityInput.value, 10) || 400;
-        if (containersInBuffer.size >= capacity) {
-            showToast(t('buffer_is_full'), 'warning');
-            return;
-        }
-        containersInBuffer.add(id);
-    } else if (action === 'remove') {
-        containersInBuffer.delete(id);
-    }
-
-    // MODIFICADO: Sincroniza a mudança do buffer com o Firestore
-    sincronizarComFirestore();
-}
-
-// --- Funções de Exportação e Modal (código original sem alterações) ---
 async function handlePdfExport() {
-    // ... (código original sem alterações) ...
     showLoading();
     const reportContent = document.getElementById('report-content');
     if (!reportContent) { hideLoading(); return; }
@@ -1053,16 +1060,18 @@ async function handlePdfExport() {
 }
 
 function handleDailyPlanExport(event: Event) {
-    // ... (código original sem alterações) ...
     const target = (event.target as HTMLElement).closest('.export-plan-btn') as HTMLElement;
     if (!target) return;
+
     const date = target.dataset.date;
     const format = target.dataset.format;
     const dailyData = date ? deliveryPlanCache[date] : [];
+
     if (dailyData.length === 0) {
         showToast('Nenhum dado para exportar.', 'warning');
         return;
     }
+
     if (format === 'pdf') {
         exportDailyPlanToPdf(dailyData, date!);
     } else if (format === 'excel') {
@@ -1071,10 +1080,10 @@ function handleDailyPlanExport(event: Event) {
 }
 
 function exportDailyPlanToPdf(data: any[], date: string) {
-    // ... (código original sem alterações) ...
     const { jsPDF } = jspdf;
     const doc = new jsPDF();
     const formattedDate = new Date(date).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+
     const head = [['#', 'Contêiner', 'Prazo Retorno', 'Dias Restantes', 'Navio', 'PO SAP', 'Armazém']];
     const body = data.map((c, i) => [
         i + 1,
@@ -1085,6 +1094,7 @@ function exportDailyPlanToPdf(data: any[], date: string) {
         c['PO SAP'] || '',
         c['BONDED WAREHOUSE'] || '',
     ]);
+
     doc.text(`${t('plan_daily_schedule_for')} ${formattedDate}`, 14, 15);
     (doc as any).autoTable({
         head,
@@ -1093,11 +1103,11 @@ function exportDailyPlanToPdf(data: any[], date: string) {
         theme: 'grid',
         headStyles: { fillColor: [22, 160, 133] },
     });
+
     doc.save(`plano_entrega_${date}.pdf`);
 }
 
 function exportDailyPlanToExcel(data: any[], date: string) {
-    // ... (código original sem alterações) ...
     const dataForSheet = data.map((c, i) => ({
         '#': i + 1,
         'Contêiner': c['CNTRS ORIGINAL'] || '',
@@ -1114,7 +1124,6 @@ function exportDailyPlanToExcel(data: any[], date: string) {
 }
 
 function openModal(item: any) {
-    // ... (código original sem alterações) ...
     activeModalItem = item;
     modalSortState = { column: 'daysToDeadline', direction: 'asc' };
     renderModalContent();
@@ -1124,7 +1133,6 @@ function openModal(item: any) {
 }
 
 function closeModal() {
-    // ... (código original sem alterações) ...
     detailsModal.classList.remove('modal-open');
       setTimeout(() => {
         detailsModal.classList.add('hidden');
@@ -1134,7 +1142,6 @@ function closeModal() {
 }
 
 function handleModalSort(event: Event) {
-    // ... (código original sem alterações) ...
     const target = (event.target as HTMLElement).closest('th');
     if (!target || !target.dataset.key) return;
     const sortKey = target.dataset.key;
@@ -1148,8 +1155,8 @@ function handleModalSort(event: Event) {
 }
 
 function renderModalContent() {
-    // ... (código original sem alterações) ...
     if (!activeModalItem) return;
+
     const { name, totalFCL, containers } = activeModalItem;
     modalHeaderContent.innerHTML = `<h2 class="text-2xl font-bold text-gray-800 dark:text-slate-100">${currentView === 'po' ? 'PO: ' : ''}${name}</h2><p class="text-gray-600 dark:text-slate-400">${totalFCL} ${t('containers_unit')}</p>`;
     
