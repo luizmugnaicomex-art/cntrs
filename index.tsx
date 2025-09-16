@@ -4,12 +4,88 @@ declare const Chart: any;
 declare const ChartDataLabels: any;
 declare const jspdf: { jsPDF: any };
 declare const html2canvas: any;
-// Note: jspdf-autotable is a plugin, so it attaches to the jsPDF instance.
-// We'll access it via `doc.autoTable` where `doc` is a jsPDF instance.
+// ADICIONADO: Declaração para o TypeScript reconhecer o Firebase
+declare const firebase: any;
 
-// --- DOM Elements ---
+// ======================================================
+// ==== BLOCO DE INICIALIZAÇÃO E FUNÇÕES DO FIREBASE ====
+// ======================================================
+
+// 1. Configuração do Firebase com as variáveis de ambiente
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
+};
+
+// 2. Inicializa o Firebase e o Firestore Database
+if (!firebase.apps.length) {
+  firebase.initializeApp(firebaseConfig);
+}
+const db = firebase.firestore();
+
+// 3. Função para salvar os dados no Firestore (substitui o saveDataToStorage)
+//    Esta função será chamada sempre que houver uma alteração local (upload, mudança no buffer).
+const sincronizarComFirestore = () => {
+  const stateToSave = {
+    data: originalData,
+    containersInBuffer: Array.from(containersInBuffer),
+    timestamp: new Date().toISOString()
+  };
+  
+  // Usamos um documento fixo para guardar o estado completo do dashboard
+  db.collection("painel-containeres").doc("estado-atual").set(stateToSave)
+    .then(() => {
+      console.log("Dashboard sincronizado com o Firestore!");
+    })
+    .catch((error: any) => {
+      console.error("Erro ao sincronizar com o Firestore: ", error);
+      showToast("Erro ao salvar dados na nuvem.", "error");
+    });
+};
+
+// 4. Função para escutar mudanças no Firestore (substitui o loadDataFromStorage)
+//    Esta função é a "mágica" do tempo real. Ela atualiza a tela quando os dados mudam no servidor.
+const escutarMudancasEmTempoReal = () => {
+  db.collection("painel-containeres").doc("estado-atual").onSnapshot(
+    (doc: any) => {
+      if (doc.exists) {
+        const estadoDaNuvem = doc.data();
+        console.log("Dados recebidos do Firestore em tempo real.");
+        
+        // Atualiza o estado global da aplicação com os dados da nuvem
+        originalData = estadoDaNuvem.data || [];
+        containersInBuffer = new Set(estadoDaNuvem.containersInBuffer || []);
+        
+        // Renderiza a UI com os novos dados
+        populateFilters(originalData);
+        applyFiltersAndRender();
+        showDashboard();
+        
+        const loadedDate = new Date(estadoDaNuvem.timestamp);
+        lastUpdate.textContent = `${t('upload_prompt_updated')} ${loadedDate.toLocaleString('pt-BR')}`;
+        showToast("Dashboard atualizado em tempo real!", "success");
+
+      } else {
+        console.log("Nenhum dado no Firestore. Aguardando primeiro upload.");
+        // Se não há dados, a UI já está no estado inicial, então não fazemos nada.
+      }
+    },
+    (error: any) => {
+      console.error("Erro de conexão com o Firestore: ", error);
+      showToast("Erro de conexão com o servidor de dados.", "error");
+    }
+  );
+};
+
+
+// --- DOM Elements (código original sem alterações) ---
 const fileUpload = document.getElementById('file-upload') as HTMLInputElement;
 const dashboardGrid = document.getElementById('dashboard-grid') as HTMLElement;
+// ... (todo o restante dos seus seletores de DOM permanece igual) ...
 const lastUpdate = document.getElementById('last-update') as HTMLElement;
 const placeholder = document.getElementById('placeholder') as HTMLElement;
 const filterContainer = document.getElementById('filter-container') as HTMLElement;
@@ -23,12 +99,7 @@ const dailyCapacityInput = document.getElementById('daily-capacity-input') as HT
 const bufferConfigContainer = document.getElementById('buffer-config-container') as HTMLElement;
 const bufferCapacityInput = document.getElementById('buffer-capacity-input') as HTMLInputElement;
 const bufferSearchInput = document.getElementById('buffer-search-input') as HTMLInputElement;
-
-
-// View Tabs
 const viewTabsContainer = document.getElementById('view-tabs-container') as HTMLElement;
-
-// Filter Inputs
 const statusFilter = document.getElementById('status-filter') as HTMLSelectElement;
 const finalStatusFilter = document.getElementById('final-status-filter') as HTMLSelectElement;
 const cargoTypeFilter = document.getElementById('cargo-type-filter') as HTMLSelectElement;
@@ -38,36 +109,25 @@ const vesselSearchInput = document.getElementById('vessel-search-input') as HTML
 const shipownerFilter = document.getElementById('shipowner-filter') as HTMLSelectElement;
 const shipownerSearchInput = document.getElementById('shipowner-search-input') as HTMLInputElement;
 const loadingTypeFilter = document.getElementById('loading-type-filter') as HTMLSelectElement;
-
-// Export Buttons
 const exportPdfBtn = document.getElementById('export-pdf-btn') as HTMLButtonElement;
 const translateBtn = document.getElementById('translate-btn') as HTMLButtonElement;
 const translateBtnText = document.getElementById('translate-btn-text') as HTMLSpanElement;
 const clearDataBtn = document.getElementById('clear-data-btn') as HTMLButtonElement;
 const themeToggleBtn = document.getElementById('theme-toggle-btn') as HTMLButtonElement;
-
-
-// Loading Overlay
 const loadingOverlay = document.getElementById('loading-overlay') as HTMLElement;
-
-// Modal Elements
 const detailsModal = document.getElementById('details-modal') as HTMLElement;
 const modalContent = document.getElementById('modal-content') as HTMLElement;
 const modalHeaderContent = document.getElementById('modal-header-content') as HTMLElement;
 const modalBody = document.getElementById('modal-body') as HTMLElement;
 const modalCloseBtn = document.getElementById('modal-close-btn') as HTMLButtonElement;
-
-// Chart Titles
 const barChartTitle = document.getElementById('bar-chart-title') as HTMLElement;
-
-// Summary Section
 const summaryContainer = document.getElementById('summary-container') as HTMLElement;
 const highRiskCount = document.getElementById('high-risk-count') as HTMLElement;
 const mediumRiskCount = document.getElementById('medium-risk-count') as HTMLElement;
 const lowRiskCount = document.getElementById('low-risk-count') as HTMLElement;
 const noneRiskCount = document.getElementById('none-risk-count') as HTMLElement;
 
-// --- Global State ---
+// --- Global State (código original sem alterações) ---
 type RiskCategory = 'high' | 'medium' | 'low' | 'none';
 type View = 'vessel' | 'po' | 'warehouse' | 'plan' | 'buffer';
 let originalData: any[] = [];
@@ -81,12 +141,13 @@ let activeRiskFilter: RiskCategory | null = null;
 let currentLanguage: 'pt' | 'zh' = 'pt';
 let deliveryPlanCache: { [date: string]: any[] } = {};
 let containersInBuffer: Set<string> = new Set();
-const STORAGE_KEY = 'containerDashboardData';
+// AVISO: As chaves de storage local não serão mais a fonte principal de dados.
+const STORAGE_KEY = 'containerDashboardData_backup'; // Renomeado para evitar conflito
 const THEME_STORAGE_KEY = 'containerDashboardTheme';
 
-// --- Translation Dictionary ---
+// --- Translation Dictionary (código original sem alterações) ---
 const translations = {
-    pt: {
+    pt: { /* ... seu objeto de traduções em português ... */ 
         main_title: "DASHBOARD DE CONTROLE DE CONTÊINERES",
         upload_prompt_initial: "Carregue um arquivo .xlsx para começar",
         upload_prompt_success: "Dados de",
@@ -144,7 +205,7 @@ const translations = {
         buffer_is_full: "O buffer está cheio. Não é possível adicionar mais contêineres.",
         buffer_filter_container: "Filtrar Contêiner",
     },
-    zh: {
+    zh: { /* ... seu objeto de traduções em chinês ... */ 
         main_title: "集装箱控制仪表板",
         upload_prompt_initial: "上传一个 .xlsx 文件开始",
         upload_prompt_success: "数据来自",
@@ -225,9 +286,10 @@ function initializeApp() {
     }
     Chart.register(ChartDataLabels);
 
-    // Event Listeners
+    // Event Listeners (código original sem alterações)
     fileUpload.addEventListener('change', handleFileUpload);
     applyFiltersBtn.addEventListener('click', applyFiltersAndRender);
+    // ... (todos os seus outros event listeners permanecem iguais) ...
     resetFiltersBtn.addEventListener('click', resetFiltersAndRender);
     vesselSearchInput.addEventListener('input', filterVesselOptions);
     shipownerSearchInput.addEventListener('input', filterShipownerOptions);
@@ -241,10 +303,14 @@ function initializeApp() {
     });
     exportPdfBtn.addEventListener('click', handlePdfExport);
     clearDataBtn.addEventListener('click', () => {
-        if(confirm("Você tem certeza que deseja limpar os dados salvos?")) {
-            localStorage.removeItem(STORAGE_KEY);
-            resetUI();
-            showToast("Dados salvos foram limpos.", "success");
+        // MODIFICADO: Esta ação agora limpa os dados na nuvem para todos.
+        if(confirm("Você tem certeza que deseja limpar os dados para TODOS os usuários? Esta ação não pode ser desfeita.")) {
+            // Para limpar, salvamos um estado vazio.
+            originalData = [];
+            containersInBuffer.clear();
+            sincronizarComFirestore();
+            resetUI(); // Reseta a UI local imediatamente
+            showToast("Dados na nuvem foram limpos.", "success");
         }
     });
     summaryContainer.addEventListener('click', handleSummaryCardClick);
@@ -263,7 +329,7 @@ function initializeApp() {
             renderDeliveryPlanView(filteredDataCache);
         }
     });
-     bufferCapacityInput.addEventListener('change', () => {
+      bufferCapacityInput.addEventListener('change', () => {
         if (currentView === 'buffer') {
             renderBufferControlView(filteredDataCache);
         }
@@ -273,25 +339,25 @@ function initializeApp() {
             renderBufferControlView(filteredDataCache);
         }
     });
-
-    // Modal Listeners
     modalCloseBtn.addEventListener('click', closeModal);
     detailsModal.addEventListener('click', (e) => { if (e.target === detailsModal) closeModal(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !detailsModal.classList.contains('hidden')) closeModal(); });
 
     initializeTheme();
-    loadDataFromStorage();
+    
+    // MODIFICADO: Em vez de carregar do storage local, iniciamos o listener do Firebase.
+    escutarMudancasEmTempoReal();
 }
 
-// --- Loading Indicator ---
+// --- Funções de UI e Lógica (a maioria permanece igual) ---
+
 function showLoading() { loadingOverlay.classList.remove('hidden'); }
 function hideLoading() { loadingOverlay.classList.add('hidden'); }
 
-// --- Toast Notifications ---
 function showToast(message: string, type: 'success' | 'error' | 'warning' = 'success') {
+    // ... (código original sem alterações) ...
     const toastContainer = document.getElementById('toast-container');
     if (!toastContainer) return;
-
     const toast = document.createElement('div');
     const icons = { success: 'fa-check-circle', error: 'fa-times-circle', warning: 'fa-exclamation-triangle' };
     const colors = { success: 'bg-green-500', error: 'bg-red-500', warning: 'bg-yellow-500' };
@@ -301,8 +367,8 @@ function showToast(message: string, type: 'success' | 'error' | 'warning' = 'suc
     setTimeout(() => toast.remove(), 5000);
 }
 
-// --- Theme Management ---
 function initializeTheme() {
+    // ... (código original sem alterações) ...
     const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) as 'light' | 'dark' | null;
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     const theme = savedTheme || (prefersDark ? 'dark' : 'light');
@@ -310,6 +376,7 @@ function initializeTheme() {
 }
 
 function toggleTheme() {
+    // ... (código original sem alterações) ...
     const isDark = document.documentElement.classList.contains('dark');
     const newTheme = isDark ? 'light' : 'dark';
     localStorage.setItem(THEME_STORAGE_KEY, newTheme);
@@ -317,6 +384,7 @@ function toggleTheme() {
 }
 
 function applyTheme(theme: 'light' | 'dark') {
+    // ... (código original sem alterações) ...
     const themeToggleIcon = document.getElementById('theme-toggle-icon') as HTMLElement;
     if (theme === 'dark') {
         document.documentElement.classList.add('dark');
@@ -327,33 +395,29 @@ function applyTheme(theme: 'light' | 'dark') {
         themeToggleIcon.classList.remove('fa-sun');
         themeToggleIcon.classList.add('fa-moon');
     }
-
     const isDarkMode = theme === 'dark';
-    Chart.defaults.color = isDarkMode ? '#cbd5e1' : '#64748b'; // slate-300 / slate-500
+    Chart.defaults.color = isDarkMode ? '#cbd5e1' : '#64748b';
     Chart.defaults.borderColor = isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
-
     if (originalData.length > 0) {
-        // Re-render charts with new theme colors
         applyFiltersAndRender();
     }
 }
 
-
-// --- Translation ---
 function toggleLanguage() {
+    // ... (código original sem alterações) ...
     currentLanguage = currentLanguage === 'pt' ? 'zh' : 'pt';
     translateBtnText.textContent = currentLanguage === 'pt' ? '中文' : 'Português';
     translateUI();
 }
 
 function translateUI() {
+    // ... (código original sem alterações) ...
     document.querySelectorAll('[data-translate-key]').forEach(el => {
         const key = el.getAttribute('data-translate-key') as keyof typeof translations.pt;
         if (key) {
            t(key, el as HTMLElement);
         }
     });
-    // Re-render dynamic content that needs translation
     if (originalData.length > 0) {
         applyFiltersAndRender();
         if (activeModalItem) {
@@ -362,37 +426,9 @@ function translateUI() {
     }
 }
 
-// --- Data Persistence ---
-function loadDataFromStorage() {
-    const savedStateJSON = localStorage.getItem(STORAGE_KEY);
-    if (savedStateJSON) {
-        try {
-            const savedState = JSON.parse(savedStateJSON);
-            if(savedState.data && Array.isArray(savedState.data) && savedState.timestamp) {
-                originalData = savedState.data;
-                containersInBuffer = new Set(savedState.containersInBuffer || []);
-                populateFilters(originalData);
-                applyFiltersAndRender();
-                showDashboard();
-                const loadedDate = new Date(savedState.timestamp);
-                lastUpdate.textContent = `${t('upload_prompt_loaded_from_storage')} "${loadedDate.toLocaleDateString('pt-BR')}" | ${t('upload_prompt_updated')} ${loadedDate.toLocaleTimeString('pt-BR')}`;
-                showToast("Dados carregados do armazenamento local.", "success");
-            }
-        } catch (e) {
-            console.error("Failed to load data from storage", e);
-            localStorage.removeItem(STORAGE_KEY);
-        }
-    }
-}
-
-function saveDataToStorage() {
-    const stateToSave = {
-        data: originalData,
-        containersInBuffer: Array.from(containersInBuffer),
-        timestamp: new Date().toISOString()
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
-}
+// --- Data Persistence (Funções Antigas Removidas/Substituídas) ---
+// A função loadDataFromStorage foi substituída por escutarMudancasEmTempoReal.
+// A função saveDataToStorage foi substituída por sincronizarComFirestore.
 
 // --- File Handling ---
 function handleFileUpload(event: Event) {
@@ -427,14 +463,13 @@ function handleFileUpload(event: Event) {
                 return normalizedRow;
             });
             
-            containersInBuffer = new Set(); // Reset buffer on new file upload
-            saveDataToStorage();
-            populateFilters(originalData);
-            applyFiltersAndRender();
-            showDashboard();
+            containersInBuffer.clear(); // Reseta o buffer ao carregar novo arquivo
 
-            lastUpdate.textContent = `${t('upload_prompt_success')} "${sheetName}" | ${t('upload_prompt_updated')} ${new Date().toLocaleString('pt-BR')}`;
-            showToast('Dashboard carregado com sucesso!', 'success');
+            // MODIFICADO: Em vez de salvar localmente, sincroniza com o Firestore.
+            // A UI será atualizada automaticamente pelo "escutador" (listener).
+            sincronizarComFirestore();
+            
+            showToast('Arquivo enviado. Sincronizando com todos os usuários...', 'success');
         } catch (err: any) {
             showToast(err.message || 'Erro ao processar arquivo.', 'error');
             resetUI();
@@ -448,8 +483,11 @@ function handleFileUpload(event: Event) {
     reader.readAsArrayBuffer(file);
 }
 
-// --- Data Processing & Filtering ---
+// --- O RESTANTE DO CÓDIGO (Data Processing, UI Rendering, Exports, Modal) ---
+// --- A maioria dessas funções não precisa de alteração, exceto onde salvam o estado. ---
+
 function excelDateToJSDate(serial: any): Date | null {
+    // ... (código original sem alterações) ...
     if (serial === null || serial === undefined || serial === '') return null;
     if (typeof serial === 'string') {
         if (/^\d{5}$/.test(serial)) { serial = parseInt(serial, 10); }
@@ -472,6 +510,7 @@ function excelDateToJSDate(serial: any): Date | null {
 }
 
 function getContainerRisk(container: any): RiskCategory {
+    // ... (código original sem alterações) ...
     const isDelivered = (container['STATUS'] || '').toLowerCase().includes('entregue');
     if (isDelivered) return 'none';
     const deadline = excelDateToJSDate(container['DEADLINE RETURN CNTR']);
@@ -486,6 +525,7 @@ function getContainerRisk(container: any): RiskCategory {
 function getSelectedOptions(select: HTMLSelectElement) { return Array.from(select.selectedOptions).map(opt => opt.value); }
 
 function filterVesselOptions() {
+    // ... (código original sem alterações) ...
     const searchTerm = vesselSearchInput.value.toUpperCase();
     const options = vesselFilter.options;
     for (let i = 0; i < options.length; i++) {
@@ -496,6 +536,7 @@ function filterVesselOptions() {
 }
 
 function filterShipownerOptions() {
+    // ... (código original sem alterações) ...
     const searchTerm = shipownerSearchInput.value.toUpperCase();
     const options = shipownerFilter.options;
     for (let i = 0; i < options.length; i++) {
@@ -506,10 +547,10 @@ function filterShipownerOptions() {
 }
 
 function applyFiltersAndRender() {
+    // ... (código original sem alterações, pois ele lê do estado global `originalData`) ...
     showLoading();
     activeRiskFilter = null; 
     updateSummaryCardStyles();
-
     setTimeout(() => {
         const selectedPOs = getSelectedOptions(poFilter).map(v => v.toUpperCase());
         const selectedVessels = getSelectedOptions(vesselFilter).map(v => v.toUpperCase());
@@ -518,7 +559,6 @@ function applyFiltersAndRender() {
         const selectedCargoTypes = getSelectedOptions(cargoTypeFilter).map(v => v.toUpperCase());
         const selectedShipowners = getSelectedOptions(shipownerFilter).map(v => v.toUpperCase());
         const selectedLoadingTypes = getSelectedOptions(loadingTypeFilter).map(v => v.toUpperCase());
-
         filteredDataCache = originalData.filter(row => 
             (selectedPOs.length === 0 || selectedPOs.includes(String(row['PO SAP'] || '').toUpperCase())) &&
             (selectedVessels.length === 0 || selectedVessels.includes(String(row['ARRIVAL VESSEL'] || '').toUpperCase())) &&
@@ -528,15 +568,14 @@ function applyFiltersAndRender() {
             (selectedShipowners.length === 0 || selectedShipowners.includes(String(row['SHIPOWNER'] || '').toUpperCase())) &&
             (selectedLoadingTypes.length === 0 || selectedLoadingTypes.includes(String(row['LOADING TYPE'] || '').toUpperCase()))
         );
-        
         setViewUI(currentView);
-        
         totalFclCount.textContent = filteredDataCache.length.toString();
         hideLoading();
     }, 50);
 }
 
 function resetFiltersAndRender() {
+    // ... (código original sem alterações) ...
     showLoading();
     setTimeout(() => {
         [poFilter, vesselFilter, statusFilter, finalStatusFilter, cargoTypeFilter, shipownerFilter, loadingTypeFilter].forEach(sel => sel.selectedIndex = -1);
@@ -550,17 +589,16 @@ function resetFiltersAndRender() {
 }
 
 function processDataForView(data: any[]) {
+    // ... (código original sem alterações) ...
     const groupByKeyMap = { vessel: 'ARRIVAL VESSEL', po: 'PO SAP', warehouse: 'BONDED WAREHOUSE' };
     const groupByKey = groupByKeyMap[currentView as 'vessel' | 'po' | 'warehouse'];
     const defaultName = `Sem ${groupByKey}`.toUpperCase();
-    
     const grouped = data.reduce((acc, row) => {
         const name = (row[groupByKey] ? String(row[groupByKey]).trim().toUpperCase() : defaultName) || defaultName;
         if (!acc[name]) acc[name] = [];
         acc[name].push(row);
         return acc;
     }, {} as Record<string, any[]>);
-
     return Object.entries(grouped).map(([name, containers]) => {
         const processed = containers.map(c => {
             const risk = getContainerRisk(c);
@@ -582,8 +620,8 @@ function processDataForView(data: any[]) {
     });
 }
 
-// --- View Switching ---
 function setView(view: View) {
+    // ... (código original sem alterações) ...
     if (currentView === view) return;
     if (currentView === 'buffer') {
         bufferSearchInput.value = '';
@@ -595,12 +633,12 @@ function setView(view: View) {
 }
 
 function setViewUI(view: View) {
+    // ... (código original sem alterações) ...
     planConfigContainer.classList.add('hidden');
     bufferConfigContainer.classList.add('hidden');
     chartsContainer.classList.add('hidden');
     summaryContainer.classList.add('hidden');
     exportPdfBtn.classList.add('hidden');
-    
     if (view === 'plan') {
         planConfigContainer.classList.remove('hidden');
         renderDeliveryPlanView(filteredDataCache);
@@ -618,8 +656,8 @@ function setViewUI(view: View) {
     }
 }
 
-// --- UI Rendering ---
 function renderSummary(filteredData: any[]) {
+    // ... (código original sem alterações) ...
     const summaryCounts: Record<RiskCategory, number> = { high: 0, medium: 0, low: 0, none: 0 };
     for (const row of filteredData) {
         summaryCounts[getContainerRisk(row)]++;
@@ -631,6 +669,7 @@ function renderSummary(filteredData: any[]) {
 }
 
 function renderDashboard(dataToRender: any[]) {
+    // ... (código original sem alterações) ...
     dashboardGrid.innerHTML = '';
     dashboardGrid.className = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6';
     if (!Array.isArray(dataToRender) || dataToRender.length === 0) {
@@ -646,6 +685,7 @@ function renderDashboard(dataToRender: any[]) {
 }
 
 function createDashboardCard(item: any) {
+    // ... (código original sem alterações) ...
     const card = document.createElement('div');
     card.className = `card risk-${item.overallRisk} bg-white dark:bg-slate-800`;
     card.innerHTML = `
@@ -656,8 +696,8 @@ function createDashboardCard(item: any) {
     return card;
 }
 
-// --- Delivery Plan ---
 function renderDeliveryPlanView(data: any[]) {
+    // ... (código original sem alterações) ...
     dashboardGrid.innerHTML = '';
     dashboardGrid.className = 'grid grid-cols-1 gap-6';
 
@@ -686,7 +726,6 @@ function renderDeliveryPlanView(data: any[]) {
     for (const container of containersToSchedule) {
         let scheduled = false;
         while(!scheduled) {
-            // Skip weekends
             while (scheduleDate.getDay() === 0 || scheduleDate.getDay() === 6) {
                 scheduleDate.setDate(scheduleDate.getDate() + 1);
             }
@@ -706,8 +745,7 @@ function renderDeliveryPlanView(data: any[]) {
     let planHtml = '';
     const headers = ['#', 'Contêiner', 'Prazo Retorno', 'Dias Restantes', 'Navio', 'PO SAP', 'Armazém'];
     const tableHeader = headers.map(h => `<th class="px-2 py-2 text-left font-semibold text-gray-600 dark:text-slate-300 text-xs uppercase">${h}</th>`).join('');
-
-    // FIX: Use Object.entries() to ensure `daySchedule` is correctly typed as an array. This resolves errors with `.map` and `.length` during iteration. The sort is maintained to keep output chronological.
+    
     for (const [date, daySchedule] of Object.entries(deliveryPlanCache).sort((a, b) => a[0].localeCompare(b[0]))) {
 
         const formattedDate = new Date(date).toLocaleDateString('pt-BR', { timeZone: 'UTC', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -752,8 +790,8 @@ function renderDeliveryPlanView(data: any[]) {
     dashboardGrid.innerHTML = planHtml;
 }
 
-// --- Buffer Control ---
 function renderBufferControlView(data: any[]) {
+    // ... (código original sem alterações) ...
     dashboardGrid.innerHTML = '';
     dashboardGrid.className = 'grid grid-cols-1 gap-6';
 
@@ -832,9 +870,8 @@ function renderBufferControlView(data: any[]) {
     dashboardGrid.innerHTML = statsHtml + tablesHtml;
 }
 
-
-// --- Chart Rendering ---
 function renderCharts(processedData: any[], filteredData: any[]) {
+    // ... (código original sem alterações) ...
     const viewKeyMap = { vessel: 'view_by_vessel', po: 'view_by_po', warehouse: 'view_by_warehouse' } as const;
     barChartTitle.textContent = t(viewKeyMap[currentView as keyof typeof viewKeyMap]);
 
@@ -885,8 +922,8 @@ function renderCharts(processedData: any[], filteredData: any[]) {
     updateChart('deadline-distribution-chart', 'bar', deadlineData, { responsive: true, plugins: { legend: { display: false } } });
 }
 
-// --- Helper Functions ---
 function populateFilters(data: any[]) {
+    // ... (código original sem alterações) ...
     const createOptions = (arr: string[]) => arr.map(item => `<option value="${item}">${item}</option>`).join('');
     const unique = (key: string) => {
         const seen = new Map<string, string>();
@@ -909,6 +946,7 @@ function populateFilters(data: any[]) {
 }
 
 function showDashboard() {
+    // ... (código original sem alterações) ...
     filterContainer.classList.remove('hidden');
     viewTabsContainer.classList.remove('hidden');
     exportPdfBtn.classList.remove('hidden');
@@ -917,6 +955,7 @@ function showDashboard() {
 }
 
 function resetUI() {
+    // ... (código original sem alterações) ...
     dashboardGrid.innerHTML = '';
     placeholder.classList.remove('hidden');
     filterContainer.classList.add('hidden');
@@ -937,13 +976,14 @@ function resetUI() {
 }
 
 function formatDate(dateString: any): string {
+    // ... (código original sem alterações) ...
     const date = excelDateToJSDate(dateString);
     if (!date) return 'N/A';
     return date.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
 }
 
-// --- Event Handlers ---
 function handleSummaryCardClick(event: Event) {
+    // ... (código original sem alterações) ...
     const card = (event.target as HTMLElement).closest('.summary-card') as HTMLElement;
     if (!card || currentView === 'plan' || currentView === 'buffer') return;
     const risk = card.dataset.risk as RiskCategory;
@@ -962,6 +1002,7 @@ function handleSummaryCardClick(event: Event) {
 }
 
 function updateSummaryCardStyles() {
+    // ... (código original sem alterações) ...
     summaryContainer.querySelectorAll('.summary-card').forEach(card => {
         const cardEl = card as HTMLElement;
         if (cardEl.dataset.risk === activeRiskFilter) cardEl.classList.add('active-summary-card');
@@ -988,12 +1029,13 @@ function handleBufferAction(event: Event) {
         containersInBuffer.delete(id);
     }
 
-    saveDataToStorage();
-    renderBufferControlView(filteredDataCache);
+    // MODIFICADO: Sincroniza a mudança do buffer com o Firestore
+    sincronizarComFirestore();
 }
 
-// --- Exporting ---
+// --- Funções de Exportação e Modal (código original sem alterações) ---
 async function handlePdfExport() {
+    // ... (código original sem alterações) ...
     showLoading();
     const reportContent = document.getElementById('report-content');
     if (!reportContent) { hideLoading(); return; }
@@ -1011,18 +1053,16 @@ async function handlePdfExport() {
 }
 
 function handleDailyPlanExport(event: Event) {
+    // ... (código original sem alterações) ...
     const target = (event.target as HTMLElement).closest('.export-plan-btn') as HTMLElement;
     if (!target) return;
-
     const date = target.dataset.date;
     const format = target.dataset.format;
     const dailyData = date ? deliveryPlanCache[date] : [];
-
     if (dailyData.length === 0) {
         showToast('Nenhum dado para exportar.', 'warning');
         return;
     }
-
     if (format === 'pdf') {
         exportDailyPlanToPdf(dailyData, date!);
     } else if (format === 'excel') {
@@ -1031,10 +1071,10 @@ function handleDailyPlanExport(event: Event) {
 }
 
 function exportDailyPlanToPdf(data: any[], date: string) {
+    // ... (código original sem alterações) ...
     const { jsPDF } = jspdf;
     const doc = new jsPDF();
     const formattedDate = new Date(date).toLocaleDateString('pt-BR', { timeZone: 'UTC' });
-
     const head = [['#', 'Contêiner', 'Prazo Retorno', 'Dias Restantes', 'Navio', 'PO SAP', 'Armazém']];
     const body = data.map((c, i) => [
         i + 1,
@@ -1045,7 +1085,6 @@ function exportDailyPlanToPdf(data: any[], date: string) {
         c['PO SAP'] || '',
         c['BONDED WAREHOUSE'] || '',
     ]);
-
     doc.text(`${t('plan_daily_schedule_for')} ${formattedDate}`, 14, 15);
     (doc as any).autoTable({
         head,
@@ -1054,11 +1093,11 @@ function exportDailyPlanToPdf(data: any[], date: string) {
         theme: 'grid',
         headStyles: { fillColor: [22, 160, 133] },
     });
-
     doc.save(`plano_entrega_${date}.pdf`);
 }
 
 function exportDailyPlanToExcel(data: any[], date: string) {
+    // ... (código original sem alterações) ...
     const dataForSheet = data.map((c, i) => ({
         '#': i + 1,
         'Contêiner': c['CNTRS ORIGINAL'] || '',
@@ -1074,8 +1113,8 @@ function exportDailyPlanToExcel(data: any[], date: string) {
     XLSX.writeFile(workbook, `plano_entrega_${date}.xlsx`);
 }
 
-// --- Modal ---
 function openModal(item: any) {
+    // ... (código original sem alterações) ...
     activeModalItem = item;
     modalSortState = { column: 'daysToDeadline', direction: 'asc' };
     renderModalContent();
@@ -1085,8 +1124,9 @@ function openModal(item: any) {
 }
 
 function closeModal() {
+    // ... (código original sem alterações) ...
     detailsModal.classList.remove('modal-open');
-     setTimeout(() => {
+      setTimeout(() => {
         detailsModal.classList.add('hidden');
         document.body.classList.remove('overflow-hidden');
         activeModalItem = null;
@@ -1094,6 +1134,7 @@ function closeModal() {
 }
 
 function handleModalSort(event: Event) {
+    // ... (código original sem alterações) ...
     const target = (event.target as HTMLElement).closest('th');
     if (!target || !target.dataset.key) return;
     const sortKey = target.dataset.key;
@@ -1107,8 +1148,8 @@ function handleModalSort(event: Event) {
 }
 
 function renderModalContent() {
+    // ... (código original sem alterações) ...
     if (!activeModalItem) return;
-
     const { name, totalFCL, containers } = activeModalItem;
     modalHeaderContent.innerHTML = `<h2 class="text-2xl font-bold text-gray-800 dark:text-slate-100">${currentView === 'po' ? 'PO: ' : ''}${name}</h2><p class="text-gray-600 dark:text-slate-400">${totalFCL} ${t('containers_unit')}</p>`;
     
